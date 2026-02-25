@@ -1,5 +1,5 @@
 # FreeRADIUS Web GUI (MVP)
-## This is a work in progress  it's been vibe-coded in an afternoon so far
+### **** This is a work in progress  it's been vibe-coded in an afternoon so far ****
 
 A minimal Flask dashboard for operating a FreeRADIUS service with:
 - service start/stop/restart
@@ -96,4 +96,5 @@ and cannot be downgraded by RBAC assignments.
 
 - Metrics are summary counts, not full time-series charting.
 - No per-action audit log persistence yet.
+
 
