@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FreeRADIUS Web GUI</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="container">
+    <header class="row between">
+      <h1>FreeRADIUS Web GUI</h1>
+      <button id="logout-btn">Logout</button>
+    </header>
+
+    <nav class="tabs row gap" aria-label="Main sections">
+      <button class="tab-btn active" data-tab="overview">Overview</button>
+      <button class="tab-btn" data-tab="simple-config">Simple Config</button>
+      <button class="tab-btn" data-tab="config">Advanced Config</button>
+      <button class="tab-btn" data-tab="certs">Certificates</button>
+      <button class="tab-btn" data-tab="settings">Interface Settings</button>
+    </nav>
+
+    <section class="tab-panel" data-tab-panel="overview">
+      <section class="panel">
+        <h2>Service</h2>
+        <div class="row gap">
+          <p>Status: <strong id="service-status">Loading...</strong></p>
+          <button data-service-action="start">Start</button>
+          <button data-service-action="stop">Stop</button>
+          <button data-service-action="restart">Restart</button>
+        </div>
+      </section>
+
+      <section class="panel two-col">
+        <div>
+          <h2>Logs</h2>
+          <div class="row gap">
+            <button id="refresh-logs">Refresh</button>
+          </div>
+          <pre id="logs"></pre>
+        </div>
+        <div>
+          <h2>Auth Summary</h2>
+          <div class="row gap">
+            <button id="refresh-metrics">Refresh</button>
+          </div>
+          <p>Success: <strong id="metric-success">0</strong></p>
+          <p>Failure: <strong id="metric-failure">0</strong></p>
+          <div class="bar-wrap">
+            <div id="bar-success" class="bar success" style="width:0%"></div>
+            <div id="bar-failure" class="bar failure" style="width:0%"></div>
+          </div>
+        </div>
+      </section>
+
+    </section>
+
+    <section class="tab-panel hidden" data-tab-panel="config">
+      <section class="panel config-layout">
+        <aside class="config-sidebar">
+          <h3>Categories</h3>
+          <div id="config-categories" class="stack gap"></div>
+          <h3>Files</h3>
+          <div id="config-files" class="stack gap"></div>
+        </aside>
+
+        <div class="config-main">
+          <h2 id="config-title">Configuration</h2>
+          <div class="row gap">
+            <button id="load-config">Reload</button>
+            <button id="save-config">Save + Validate + Restart</button>
+            <button id="rollback-config">Rollback (latest)</button>
+          </div>
+          <textarea id="config-content" rows="16" spellcheck="false"></textarea>
+          <p id="config-meta" class="muted"></p>
+        </div>
+      </section>
+    </section>
+
+    <section class="tab-panel hidden" data-tab-panel="simple-config">
+      <section class="panel simple-layout">
+        <aside class="simple-sidebar">
+          <h3>Simple Areas</h3>
+          <div class="stack gap">
+            <button class="sidebar-btn active" data-simple-section="radiusd">radiusd</button>
+            <button class="sidebar-btn" data-simple-section="clients">clients</button>
+            <button class="sidebar-btn" data-simple-section="mods">Modules (mods)</button>
+            <button class="sidebar-btn" data-simple-section="sites">Virtual Servers (sites)</button>
+            <button class="sidebar-btn" data-simple-section="policy">policy</button>
+          </div>
+          <div class="row gap simple-actions">
+            <button id="load-simple-sections">Reload sections</button>
+            <button id="load-simple-config">Reload toggles</button>
+            <button id="apply-simple-config">Validate, Apply + Restart</button>
+          </div>
+          <p id="simple-apply-status" class="muted"></p>
+        </aside>
+
+        <div class="simple-main">
+          <section class="simple-panel" data-simple-panel="radiusd">
+            <h2>radiusd.conf</h2>
+            <p class="muted" id="simple-radiusd-path"></p>
+            <textarea id="simple-radiusd-content" rows="18" readonly spellcheck="false"></textarea>
+          </section>
+
+          <section class="simple-panel hidden" data-simple-panel="clients">
+            <h2>clients.conf</h2>
+            <p class="muted" id="simple-clients-path"></p>
+            <textarea id="simple-clients-content" rows="14" readonly spellcheck="false"></textarea>
+
+            <div class="panel inset-panel">
+              <h3>Add new client</h3>
+              <input id="simple-add-client-name" placeholder="Client name (e.g. branch-ap-01)">
+              <input id="simple-add-client-ipaddr" placeholder="ipaddr (e.g. 10.10.1.15)">
+              <input id="simple-add-client-secret" placeholder="secret">
+              <input id="simple-add-client-nastype" placeholder="nastype (default: other)">
+              <label class="simple-option-row" for="simple-add-client-require-ma">
+                <input id="simple-add-client-require-ma" type="checkbox">
+                <div class="simple-option-text">
+                  <div class="simple-option-title">require_message_authenticator</div>
+                  <div class="simple-option-desc">Require Message-Authenticator for this client.</div>
+                </div>
+              </label>
+              <button id="add-simple-client">Add new client</button>
+            </div>
+          </section>
+
+          <section class="simple-panel hidden" data-simple-panel="mods">
+            <h2>Modules (mods)</h2>
+            <p class="muted">Common authentication and integration modules.</p>
+            <div id="simple-mods" class="simple-options stack gap"></div>
+          </section>
+
+          <section class="simple-panel hidden" data-simple-panel="sites">
+            <h2>Virtual servers (sites)</h2>
+            <p class="muted">Primary FreeRADIUS virtual server configurations.</p>
+            <div id="simple-sites" class="simple-options stack gap"></div>
+          </section>
+
+          <section class="simple-panel hidden" data-simple-panel="policy">
+            <h2>policy.d</h2>
+            <p class="muted" id="simple-policy-directory"></p>
+            <div class="row gap">
+              <select id="simple-policy-select"></select>
+              <button id="load-simple-policy">Load selected policy</button>
+            </div>
+            <p class="muted" id="simple-policy-path"></p>
+            <textarea id="simple-policy-content" rows="12" readonly spellcheck="false"></textarea>
+
+            <div class="panel inset-panel">
+              <h3>Add new policy file</h3>
+              <input id="simple-add-policy-filename" placeholder="filename (e.g. custom-policy.conf)">
+              <textarea id="simple-add-policy-content" rows="8" spellcheck="false" placeholder="Enter policy file content"></textarea>
+              <button id="add-simple-policy">Add new policy</button>
+            </div>
+          </section>
+        </div>
+      </section>
+    </section>
+
+    <section class="tab-panel hidden" data-tab-panel="certs">
+      <section class="panel cert-layout">
+        <aside class="cert-sidebar">
+          <h3>Certificate Areas</h3>
+          <div class="stack gap">
+            <button class="sidebar-btn active" data-cert-section="server">Server Certificate</button>
+            <button class="sidebar-btn" data-cert-section="trusted">Trusted Certs</button>
+          </div>
+        </aside>
+
+        <div class="cert-main">
+          <p id="cert-action-message" class="muted"></p>
+
+          <section class="cert-panel" data-cert-panel="server">
+            <h2>Server certificate bundle</h2>
+            <p class="muted">Updates the configured FreeRADIUS server cert file and restarts after validation.</p>
+            <textarea id="server-cert-content" rows="10" spellcheck="false" placeholder="Paste server.pem content"></textarea>
+            <div class="row gap">
+              <button id="update-server-cert">Update server cert</button>
+              <button id="refresh-server-cert-details">Refresh details</button>
+            </div>
+            <p id="server-cert-meta" class="muted"></p>
+            <pre id="server-cert-details" class="cert-details muted">Loading server certificate details...</pre>
+
+            <div class="panel inset-panel">
+              <h3>Upload certificate file</h3>
+              <p class="muted">Supported formats: .pem, .crt, .cer, .der, .p7b (converted to PEM).</p>
+              <input id="server-cert-file" type="file" accept=".pem,.crt,.cer,.der,.p7b,.p7c">
+              <button id="upload-server-cert">Upload and apply</button>
+            </div>
+
+            <div class="panel inset-panel">
+              <h3>Generate CSR</h3>
+              <p class="muted">Use this when no current certificate exists or when requesting a new signed cert.</p>
+              <input id="csr-common-name" placeholder="Common Name (e.g. radius.example.com)">
+              <input id="csr-organization" placeholder="Organization (optional)">
+              <input id="csr-org-unit" placeholder="Organizational Unit (optional)">
+              <input id="csr-country" placeholder="Country code (optional, e.g. GB)">
+              <input id="csr-state" placeholder="State/Province (optional)">
+              <input id="csr-locality" placeholder="Locality (optional)">
+              <input id="csr-email" placeholder="Email (optional)">
+              <input id="csr-san" placeholder="SANs comma-separated (optional, e.g. radius.example.com,DNS:radius.local)">
+              <button id="generate-server-csr">Generate CSR</button>
+              <pre id="server-csr-output" class="cert-details muted">Generated CSR will appear here.</pre>
+            </div>
+          </section>
+
+          <section class="cert-panel hidden" data-cert-panel="trusted">
+            <h2>Trusted root certificate</h2>
+            <p class="muted">Installs a new trusted root on host and updates the trust store.</p>
+            <input id="root-cert-filename" placeholder="example.crt">
+            <textarea id="root-cert-content" rows="8" spellcheck="false" placeholder="Paste root certificate"></textarea>
+            <button id="add-root-cert">Add trusted root</button>
+
+            <div class="row between gap">
+              <h3>Installed trusted roots</h3>
+              <button id="refresh-trusted-roots">Refresh list</button>
+            </div>
+            <p id="trusted-root-meta" class="muted"></p>
+            <ul id="trusted-root-list" class="cert-list"></ul>
+            <h3>Certificate details</h3>
+            <pre id="trusted-root-details" class="cert-details muted">Select a certificate and click "View details".</pre>
+          </section>
+        </div>
+      </section>
+    </section>
+
+    <section class="tab-panel hidden" data-tab-panel="settings">
+      <section class="panel">
+        <h2>Interface Settings</h2>
+        <p class="muted">Customize screen usage and color style for this browser.</p>
+
+        <label for="interface-width">Screen width usage (<span id="interface-width-value">70</span>%)</label>
+        <input id="interface-width" type="range" min="50" max="95" step="5" value="70">
+
+        <label for="interface-theme">Color style</label>
+        <select id="interface-theme">
+          <option value="default">Default Dark</option>
+          <option value="ocean">Ocean Dark</option>
+          <option value="light">Light</option>
+          <option value="forest">Forest Dark</option>
+          <option value="sunset">Sunset Dark</option>
+        </select>
+
+        <div class="row gap">
+          <button id="save-interface-settings">Save settings</button>
+          <button id="reset-interface-settings">Reset defaults</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Authentication Settings</h2>
+        <p class="muted">Configure optional Microsoft Entra ID login for this Web GUI.</p>
+
+        <label for="auth-mode">Auth mode</label>
+        <select id="auth-mode">
+          <option value="local">local</option>
+          <option value="entra">entra</option>
+          <option value="hybrid">hybrid</option>
+        </select>
+
+        <label class="simple-option-row" for="auth-local-fallback">
+          <input id="auth-local-fallback" type="checkbox">
+          <div class="simple-option-text">
+            <div class="simple-option-title">LOCAL_AUTH_FALLBACK</div>
+            <div class="simple-option-desc">Allow local login even when auth mode includes Entra.</div>
+          </div>
+        </label>
+
+        <label for="auth-entra-tenant-id">Entra tenant ID</label>
+        <input id="auth-entra-tenant-id" placeholder="Tenant GUID">
+
+        <label for="auth-entra-client-id">Entra client ID</label>
+        <input id="auth-entra-client-id" placeholder="Application (client) ID">
+
+        <label for="auth-entra-client-secret">Entra client secret</label>
+        <input id="auth-entra-client-secret" type="password" placeholder="Client secret">
+
+        <label for="auth-entra-redirect-uri">Entra redirect URI</label>
+        <input id="auth-entra-redirect-uri" placeholder="https://host/auth/entra/callback">
+
+        <label for="auth-entra-scopes">Entra scopes</label>
+        <input id="auth-entra-scopes" placeholder="openid profile email">
+
+        <label for="auth-entra-group-claim">Entra group claim</label>
+        <input id="auth-entra-group-claim" placeholder="groups">
+
+        <div class="row gap">
+          <button id="load-auth-settings">Load auth settings</button>
+          <button id="save-auth-settings">Save auth settings</button>
+        </div>
+        <p id="auth-settings-status" class="muted"></p>
+      </section>
+
+      <section class="panel">
+        <h2>Access Control</h2>
+        <p class="muted">Manage custom roles and role assignments for Web GUI access.</p>
+        <div class="row gap">
+          <button id="refresh-rbac">Refresh access data</button>
+        </div>
+
+        <h3>Roles</h3>
+        <ul id="rbac-roles-list" class="cert-list"></ul>
+
+        <div class="panel inset-panel">
+          <h3>Create custom role</h3>
+          <input id="rbac-role-name" placeholder="Role name">
+          <div id="rbac-permissions" class="stack gap"></div>
+          <button id="rbac-create-role">Create role</button>
+        </div>
+
+        <div class="panel inset-panel">
+          <h3>Assign role to user</h3>
+          <input id="rbac-user-principal" placeholder="User principal (email/UPN)">
+          <select id="rbac-user-role"></select>
+          <div class="row gap">
+            <button id="rbac-assign-user-role">Assign user role</button>
+            <button id="rbac-remove-user-role">Remove user role</button>
+          </div>
+          <ul id="rbac-user-assignments" class="cert-list"></ul>
+        </div>
+
+        <div class="panel inset-panel">
+          <h3>Assign role to Entra group</h3>
+          <input id="rbac-group-id" placeholder="Group object ID">
+          <select id="rbac-group-role"></select>
+          <div class="row gap">
+            <button id="rbac-assign-group-role">Assign group role</button>
+            <button id="rbac-remove-group-role">Remove group role</button>
+          </div>
+          <ul id="rbac-group-assignments" class="cert-list"></ul>
+        </div>
+      </section>
+    </section>
+
+    <p id="message" class="muted"></p>
+  </main>
+  <script>
+    window.APP_CONFIGS = {{ editable_configs | tojson }};
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FreeRADIUS Web GUI - Login</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="container narrow">
+    <h1>FreeRADIUS Web GUI</h1>
+    {% if local_login_enabled %}
+    <form id="login-form" class="panel">
+      <label>Username
+        <input type="text" name="username" required autocomplete="username">
+      </label>
+      <label>Passkey
+        <input type="password" name="passkey" required autocomplete="current-password">
+      </label>
+      <button type="submit">Sign in</button>
+      <p id="login-error" class="error"></p>
+    </form>
+    {% endif %}
+
+    {% if entra_login_enabled %}
+    <section class="panel">
+      <h2>Microsoft Entra ID</h2>
+      <p class="muted">Use your Entra account to access the Web GUI.</p>
+      <a href="/auth/entra/login"><button type="button">Sign in with Entra ID</button></a>
+    </section>
+    {% endif %}
+
+    {% if not local_login_enabled and not entra_login_enabled %}
+    <section class="panel">
+      <p class="error">No authentication method is currently enabled.</p>
+    </section>
+    {% endif %}
+  </main>
+  <script>
+    const form = document.getElementById('login-form');
+    const errorEl = document.getElementById('login-error');
+
+    if (form) {
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        errorEl.textContent = '';
+        const formData = new FormData(form);
+        const payload = Object.fromEntries(formData.entries());
+
+        const response = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          errorEl.textContent = data.error || 'Login failed';
+          return;
+        }
+        window.location.href = '/';
+      });
+    }
+  </script>
+</body>
+</html>
