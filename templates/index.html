@@ -58,8 +58,11 @@
 
     <section class="tab-panel hidden" data-tab-panel="config">
       <section class="panel config-layout">
-        <aside class="config-sidebar">
-          <h3>Categories</h3>
+        <aside class="config-sidebar" data-collapsible-sidebar="advanced-config">
+          <div class="row between gap">
+            <h3>Categories</h3>
+            <button type="button" class="sidebar-collapse-btn" data-toggle-sidebar="advanced-config">Collapse</button>
+          </div>
           <div id="config-categories" class="stack gap"></div>
           <h3>Files</h3>
           <div id="config-files" class="stack gap"></div>
@@ -80,8 +83,11 @@
 
     <section class="tab-panel hidden" data-tab-panel="simple-config">
       <section class="panel simple-layout">
-        <aside class="simple-sidebar">
-          <h3>Simple Areas</h3>
+        <aside class="simple-sidebar" data-collapsible-sidebar="simple-main-menu">
+          <div class="row between gap">
+            <h3>Simple Areas</h3>
+            <button type="button" class="sidebar-collapse-btn" data-toggle-sidebar="simple-main-menu">Collapse</button>
+          </div>
           <div class="stack gap">
             <button class="sidebar-btn active" data-simple-section="radiusd">radiusd</button>
             <button class="sidebar-btn" data-simple-section="clients">clients</button>
@@ -101,28 +107,125 @@
           <section class="simple-panel" data-simple-panel="radiusd">
             <h2>radiusd.conf</h2>
             <p class="muted" id="simple-radiusd-path"></p>
-            <textarea id="simple-radiusd-content" rows="18" readonly spellcheck="false"></textarea>
+            <div class="simple-clients-layout">
+              <aside class="simple-clients-sidebar" data-collapsible-sidebar="simple-radiusd-options">
+                <div class="row between gap">
+                  <h3>Options</h3>
+                  <button type="button" class="sidebar-collapse-btn" data-toggle-sidebar="simple-radiusd-options">Collapse</button>
+                </div>
+                <div class="row gap" id="simple-radiusd-view-mode">
+                  <button id="simple-radiusd-view-directives" type="button" class="sidebar-btn active">Directives</button>
+                  <button id="simple-radiusd-view-structure" type="button" class="sidebar-btn">Structure</button>
+                </div>
+                <div id="simple-radiusd-commented-wrap">
+                <label class="simple-option-row" for="simple-radiusd-show-commented">
+                  <input id="simple-radiusd-show-commented" type="checkbox">
+                  <div class="simple-option-text">
+                    <div class="simple-option-title">Show commented/default options</div>
+                    <div class="simple-option-desc">Include directives that are currently commented out in radiusd.conf.</div>
+                  </div>
+                </label>
+                </div>
+                <div id="simple-radiusd-options" class="stack gap"></div>
+              </aside>
+
+              <div class="simple-clients-main">
+                <div class="panel inset-panel">
+                  <h3 id="simple-radiusd-form-title">Select an option</h3>
+                  <p id="simple-radiusd-form-desc" class="muted"></p>
+                  <p id="simple-radiusd-form-meta" class="muted"></p>
+
+                  <label for="simple-radiusd-option-value">Value</label>
+                  <input id="simple-radiusd-option-value" placeholder="Option value">
+                  <textarea id="simple-radiusd-code-entry" rows="10" readonly spellcheck="false" class="hidden"></textarea>
+
+                  <p id="simple-radiusd-status" class="muted"></p>
+                  <div class="row gap">
+                    <button id="save-simple-radiusd-option" type="button">Save option</button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </section>
 
           <section class="simple-panel hidden" data-simple-panel="clients">
             <h2>clients.conf</h2>
             <p class="muted" id="simple-clients-path"></p>
-            <textarea id="simple-clients-content" rows="14" readonly spellcheck="false"></textarea>
-
-            <div class="panel inset-panel">
-              <h3>Add new client</h3>
-              <input id="simple-add-client-name" placeholder="Client name (e.g. branch-ap-01)">
-              <input id="simple-add-client-ipaddr" placeholder="ipaddr (e.g. 10.10.1.15)">
-              <input id="simple-add-client-secret" placeholder="secret">
-              <input id="simple-add-client-nastype" placeholder="nastype (default: other)">
-              <label class="simple-option-row" for="simple-add-client-require-ma">
-                <input id="simple-add-client-require-ma" type="checkbox">
-                <div class="simple-option-text">
-                  <div class="simple-option-title">require_message_authenticator</div>
-                  <div class="simple-option-desc">Require Message-Authenticator for this client.</div>
+            <div class="simple-clients-layout">
+              <aside class="simple-clients-sidebar" data-collapsible-sidebar="simple-clients-list">
+                <div class="row between gap">
+                  <h3>Clients</h3>
+                  <div class="row gap">
+                    <button id="simple-new-client" type="button">New</button>
+                    <button type="button" class="sidebar-collapse-btn" data-toggle-sidebar="simple-clients-list">Collapse</button>
+                  </div>
                 </div>
-              </label>
-              <button id="add-simple-client">Add new client</button>
+                <div id="simple-clients-list" class="stack gap"></div>
+              </aside>
+
+              <div class="simple-clients-main">
+                <div class="panel inset-panel">
+                  <h3 id="simple-client-form-title">Client details</h3>
+                  <label for="simple-client-name">Client name</label>
+                  <input id="simple-client-name" placeholder="branch-ap-01">
+
+                  <label for="simple-client-ipaddr">ipaddr</label>
+                  <input id="simple-client-ipaddr" placeholder="10.10.1.15">
+
+                  <label for="simple-client-ipv4addr">ipv4addr</label>
+                  <input id="simple-client-ipv4addr" placeholder="10.10.1.15">
+
+                  <label for="simple-client-ipv6addr">ipv6addr</label>
+                  <input id="simple-client-ipv6addr" placeholder="fe80::1">
+
+                  <label for="simple-client-secret">secret</label>
+                  <div class="row gap simple-secret-row">
+                    <input id="simple-client-secret" type="password" placeholder="Shared secret">
+                    <button id="simple-client-secret-toggle" type="button" class="icon-btn" aria-label="Show secret" title="Show secret">👁</button>
+                  </div>
+
+                  <label for="simple-client-nastype">nastype</label>
+                  <input id="simple-client-nastype" placeholder="other">
+
+                  <label for="simple-client-shortname">shortname</label>
+                  <input id="simple-client-shortname" placeholder="branch-ap">
+
+                  <label for="simple-client-proto">proto</label>
+                  <input id="simple-client-proto" placeholder="udp">
+
+                  <label for="simple-client-virtual-server">virtual_server</label>
+                  <input id="simple-client-virtual-server" placeholder="default">
+
+                  <label for="simple-client-source-path">Source file</label>
+                  <select id="simple-client-source-path"></select>
+
+                  <label class="simple-option-row" for="simple-client-require-ma">
+                    <input id="simple-client-require-ma" type="checkbox">
+                    <div class="simple-option-text">
+                      <div class="simple-option-title">require_message_authenticator</div>
+                      <div class="simple-option-desc">Require Message-Authenticator for this client.</div>
+                    </div>
+                  </label>
+
+                  <h4>limit { }</h4>
+                  <label for="simple-client-limit-max-connections">max_connections</label>
+                  <input id="simple-client-limit-max-connections" placeholder="16">
+
+                  <label for="simple-client-limit-lifetime">lifetime</label>
+                  <input id="simple-client-limit-lifetime" placeholder="0">
+
+                  <label for="simple-client-limit-idle-timeout">idle_timeout</label>
+                  <input id="simple-client-limit-idle-timeout" placeholder="30">
+
+                  <p id="simple-client-meta" class="muted"></p>
+                  <p id="simple-client-status" class="muted"></p>
+                  <div class="row gap">
+                    <button id="save-simple-client" type="button">Save client</button>
+                    <button id="add-simple-client" type="button">Add client</button>
+                    <button id="delete-simple-client" type="button" class="danger-btn">Delete client</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -161,8 +264,11 @@
 
     <section class="tab-panel hidden" data-tab-panel="certs">
       <section class="panel cert-layout">
-        <aside class="cert-sidebar">
-          <h3>Certificate Areas</h3>
+        <aside class="cert-sidebar" data-collapsible-sidebar="cert-main-menu">
+          <div class="row between gap">
+            <h3>Certificate Areas</h3>
+            <button type="button" class="sidebar-collapse-btn" data-toggle-sidebar="cert-main-menu">Collapse</button>
+          </div>
           <div class="stack gap">
             <button class="sidebar-btn active" data-cert-section="server">Server Certificate</button>
             <button class="sidebar-btn" data-cert-section="trusted">Trusted Certs</button>

@@ -9,6 +9,7 @@ const authSettingsStatusEl = document.getElementById('auth-settings-status');
 const appConfigs = window.APP_CONFIGS || [];
 const ACTIVE_TAB_STORAGE_KEY = 'freeradius-webgui.activeTab';
 const INTERFACE_SETTINGS_STORAGE_KEY = 'freeradius-webgui.interfaceSettings';
+const SIDEBAR_STATE_STORAGE_KEY = 'freeradius-webgui.sidebarState';
 
 let selectedCertSection = 'server';
 
@@ -65,7 +66,28 @@ let selectedCategory = sortedCategories[0] || '';
 let selectedConfigKey = (configByCategory.get(selectedCategory) || [])[0] || appConfigs[0] || '';
 let simpleConfigSnapshot = { mods: [], sites: [] };
 let selectedSimpleSection = 'radiusd';
-let simpleSectionsData = { radiusd: {}, clients: {}, policy: { files: [] } };
+let simpleSectionsData = { radiusd: {}, clients: { items: [], sources: [] }, policy: { files: [] } };
+let selectedSimpleClientId = '';
+let selectedSimpleRadiusdOptionKey = '';
+let currentUserPermissions = new Set();
+let showCommentedRadiusdOptions = false;
+let simpleRadiusdViewMode = 'directives';
+let sidebarState = {};
+
+const simpleClientFieldIds = [
+  'simple-client-name',
+  'simple-client-ipaddr',
+  'simple-client-ipv4addr',
+  'simple-client-ipv6addr',
+  'simple-client-secret',
+  'simple-client-nastype',
+  'simple-client-shortname',
+  'simple-client-proto',
+  'simple-client-virtual-server',
+  'simple-client-limit-max-connections',
+  'simple-client-limit-lifetime',
+  'simple-client-limit-idle-timeout',
+];
 
 const setMessage = (text, isError = false) => {
   messageEl.textContent = text;
@@ -95,6 +117,132 @@ const setAuthSettingsStatus = (text, mode = 'muted') => {
   authSettingsStatusEl.textContent = text;
   authSettingsStatusEl.className = mode;
 };
+
+const setSimpleClientStatus = (text, mode = 'muted') => {
+  const statusEl = document.getElementById('simple-client-status');
+  if (!statusEl) {
+    return;
+  }
+  statusEl.textContent = text;
+  statusEl.className = mode;
+};
+
+const setSimpleRadiusdStatus = (text, mode = 'muted') => {
+  const statusEl = document.getElementById('simple-radiusd-status');
+  if (!statusEl) {
+    return;
+  }
+  statusEl.textContent = text;
+  statusEl.className = mode;
+};
+
+function canViewSimpleClientSecrets() {
+  return currentUserPermissions.has('client_secret_view');
+}
+
+function setSimpleClientSecretVisibility(isVisible) {
+  const secretInput = document.getElementById('simple-client-secret');
+  const toggleButton = document.getElementById('simple-client-secret-toggle');
+  if (!secretInput || !toggleButton) {
+    return;
+  }
+  secretInput.type = isVisible ? 'text' : 'password';
+  toggleButton.textContent = isVisible ? '🙈' : '👁';
+  toggleButton.setAttribute('aria-label', isVisible ? 'Hide secret' : 'Show secret');
+  toggleButton.title = isVisible ? 'Hide secret' : 'Show secret';
+}
+
+function updateSimpleClientSecretAccess(hasExistingSecret) {
+  const secretInput = document.getElementById('simple-client-secret');
+  const toggleButton = document.getElementById('simple-client-secret-toggle');
+  if (!secretInput || !toggleButton) {
+    return;
+  }
+
+  const canView = canViewSimpleClientSecrets();
+  toggleButton.disabled = !canView;
+  toggleButton.title = canView ? 'Show secret' : 'Requires RBAC permission: client_secret_view';
+  if (!canView && hasExistingSecret) {
+    secretInput.placeholder = 'Hidden by RBAC permission';
+  } else {
+    secretInput.placeholder = 'Shared secret';
+  }
+  setSimpleClientSecretVisibility(false);
+}
+
+function markSimpleClientField(fieldId, hasError) {
+  const field = document.getElementById(fieldId);
+  if (!field) {
+    return;
+  }
+  field.classList.toggle('input-error', hasError);
+}
+
+function clearSimpleClientFieldErrors() {
+  simpleClientFieldIds.forEach((fieldId) => markSimpleClientField(fieldId, false));
+}
+
+function collectSimpleClientFormPayload() {
+  return {
+    name: document.getElementById('simple-client-name').value.trim(),
+    ipaddr: document.getElementById('simple-client-ipaddr').value.trim(),
+    ipv4addr: document.getElementById('simple-client-ipv4addr').value.trim(),
+    ipv6addr: document.getElementById('simple-client-ipv6addr').value.trim(),
+    secret: document.getElementById('simple-client-secret').value.trim(),
+    nastype: document.getElementById('simple-client-nastype').value.trim(),
+    shortname: document.getElementById('simple-client-shortname').value.trim(),
+    proto: document.getElementById('simple-client-proto').value.trim(),
+    virtual_server: document.getElementById('simple-client-virtual-server').value.trim(),
+    require_message_authenticator: document.getElementById('simple-client-require-ma').checked,
+    limit_max_connections: document.getElementById('simple-client-limit-max-connections').value.trim(),
+    limit_lifetime: document.getElementById('simple-client-limit-lifetime').value.trim(),
+    limit_idle_timeout: document.getElementById('simple-client-limit-idle-timeout').value.trim(),
+    target_path: document.getElementById('simple-client-source-path').value,
+  };
+}
+
+function validateSimpleClientPayload(payload, mode = 'add') {
+  clearSimpleClientFieldErrors();
+
+  const errors = [];
+  const hasAddress = Boolean(payload.ipaddr || payload.ipv4addr || payload.ipv6addr);
+  if (mode === 'add' && !payload.name) {
+    errors.push('Client name is required for new clients.');
+    markSimpleClientField('simple-client-name', true);
+  }
+  if (!hasAddress) {
+    errors.push('Provide at least one of ipaddr, ipv4addr, or ipv6addr.');
+    markSimpleClientField('simple-client-ipaddr', true);
+    markSimpleClientField('simple-client-ipv4addr', true);
+    markSimpleClientField('simple-client-ipv6addr', true);
+  }
+  if (mode === 'add' && !payload.secret) {
+    errors.push('Secret is required for new clients.');
+    markSimpleClientField('simple-client-secret', true);
+  }
+
+  ['limit_max_connections', 'limit_lifetime', 'limit_idle_timeout'].forEach((key) => {
+    const value = payload[key];
+    if (value && !/^\d+$/.test(value)) {
+      errors.push(`${key.replace('limit_', '').replace('_', ' ')} must be a whole number.`);
+      if (key === 'limit_max_connections') {
+        markSimpleClientField('simple-client-limit-max-connections', true);
+      } else if (key === 'limit_lifetime') {
+        markSimpleClientField('simple-client-limit-lifetime', true);
+      } else {
+        markSimpleClientField('simple-client-limit-idle-timeout', true);
+      }
+    }
+  });
+
+  if (errors.length) {
+    setSimpleClientStatus(errors.join(' '), 'error');
+    return false;
+  }
+
+  setSimpleClientStatus('Client form looks valid.', 'muted');
+  return true;
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -258,10 +406,37 @@ function renderSimpleSectionsData(data) {
   simpleSectionsData = data;
 
   document.getElementById('simple-radiusd-path').textContent = data.radiusd?.path || '';
-  document.getElementById('simple-radiusd-content').value = data.radiusd?.content || '';
+  renderSimpleRadiusdFromState();
 
   document.getElementById('simple-clients-path').textContent = data.clients?.path || '';
-  document.getElementById('simple-clients-content').value = data.clients?.content || '';
+  const sourceSelect = document.getElementById('simple-client-source-path');
+  sourceSelect.innerHTML = '';
+  (data.clients?.sources || []).forEach((sourcePath) => {
+    const option = document.createElement('option');
+    option.value = sourcePath;
+    option.textContent = sourcePath;
+    sourceSelect.appendChild(option);
+  });
+
+  if (sourceSelect.options.length === 0) {
+    const fallback = document.createElement('option');
+    fallback.value = data.clients?.path || '';
+    fallback.textContent = data.clients?.path || 'No clients source found';
+    sourceSelect.appendChild(fallback);
+  }
+
+  if (!selectedSimpleClientId || !(data.clients?.items || []).some((item) => item.id === selectedSimpleClientId)) {
+    selectedSimpleClientId = (data.clients?.items || [])[0]?.id || '';
+  }
+  renderSimpleClientsList(data.clients?.items || []);
+  if (selectedSimpleClientId) {
+    const selectedClient = (data.clients?.items || []).find((item) => item.id === selectedSimpleClientId);
+    if (selectedClient) {
+      populateSimpleClientForm(selectedClient);
+    }
+  } else {
+    prepareNewSimpleClient();
+  }
 
   document.getElementById('simple-policy-directory').textContent = data.policy?.directory || '';
   const select = document.getElementById('simple-policy-select');
@@ -284,10 +459,347 @@ function renderSimpleSectionsData(data) {
   document.getElementById('simple-policy-content').value = '';
 }
 
+function getSimpleRadiusdCollections() {
+  const radiusd = simpleSectionsData.radiusd || {};
+  const all = radiusd.items || [];
+  const directives = radiusd.directive_items || all.filter((item) => item.editable !== false);
+  const structure = radiusd.structure_items || all.filter((item) => item.editable === false);
+  return { directives, structure, all };
+}
+
+function getVisibleSimpleRadiusdItems(items) {
+  if (simpleRadiusdViewMode === 'structure') {
+    return items;
+  }
+  if (showCommentedRadiusdOptions) {
+    return items;
+  }
+  return items.filter((item) => item.active !== false);
+}
+
+function renderSimpleRadiusdViewMode() {
+  const directivesBtn = document.getElementById('simple-radiusd-view-directives');
+  const structureBtn = document.getElementById('simple-radiusd-view-structure');
+  const commentedWrap = document.getElementById('simple-radiusd-commented-wrap');
+
+  directivesBtn.classList.toggle('active', simpleRadiusdViewMode === 'directives');
+  structureBtn.classList.toggle('active', simpleRadiusdViewMode === 'structure');
+  if (commentedWrap) {
+    commentedWrap.classList.toggle('hidden', simpleRadiusdViewMode !== 'directives');
+  }
+}
+
+function renderSimpleRadiusdFromState() {
+  const collections = getSimpleRadiusdCollections();
+  const sourceItems = simpleRadiusdViewMode === 'structure' ? collections.structure : collections.directives;
+  const visibleItems = getVisibleSimpleRadiusdItems(sourceItems);
+
+  if (!selectedSimpleRadiusdOptionKey || !visibleItems.some((item) => item.key === selectedSimpleRadiusdOptionKey)) {
+    selectedSimpleRadiusdOptionKey = visibleItems[0]?.key || '';
+  }
+
+  renderSimpleRadiusdViewMode();
+  renderSimpleRadiusdOptions(visibleItems);
+
+  if (!selectedSimpleRadiusdOptionKey) {
+    clearSimpleRadiusdOptionForm();
+    return;
+  }
+
+  const selectedOption = visibleItems.find((item) => item.key === selectedSimpleRadiusdOptionKey)
+    || collections.all.find((item) => item.key === selectedSimpleRadiusdOptionKey);
+  if (selectedOption) {
+    populateSimpleRadiusdOption(selectedOption);
+  } else {
+    clearSimpleRadiusdOptionForm();
+  }
+}
+
+function renderSimpleRadiusdOptions(items) {
+  const container = document.getElementById('simple-radiusd-options');
+  container.innerHTML = '';
+
+  if (!items.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = simpleRadiusdViewMode === 'structure'
+      ? 'No structure entries found.'
+      : 'No directives match the current filter.';
+    container.appendChild(empty);
+    return;
+  }
+
+  items.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'simple-radiusd-option-row';
+
+    if (simpleRadiusdViewMode === 'directives' && showCommentedRadiusdOptions && item.editable !== false) {
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = item.active !== false;
+      checkbox.title = checkbox.checked ? 'Option is active in config' : 'Option is commented/default';
+      checkbox.addEventListener('change', async (event) => {
+        const target = event.target;
+        const intendedState = Boolean(target.checked);
+        target.disabled = true;
+        try {
+          await toggleSimpleRadiusdOptionState(item, intendedState);
+        } catch (error) {
+          target.checked = !intendedState;
+          setSimpleRadiusdStatus(error.message, 'error');
+          setMessage(error.message, true);
+        } finally {
+          target.disabled = false;
+        }
+      });
+      row.appendChild(checkbox);
+    }
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `sidebar-btn${item.key === selectedSimpleRadiusdOptionKey ? ' active' : ''}`;
+    const isCodeEntry = item.type === 'code' || item.editable === false;
+    if (isCodeEntry) {
+      button.textContent = item.active === false ? `${item.label} (code/default)` : `${item.label} (code)`;
+    } else {
+      button.textContent = item.active === false ? `${item.label} (default)` : item.label;
+    }
+    button.title = `${item.category} • ${item.directive}`;
+    button.addEventListener('click', () => {
+      selectedSimpleRadiusdOptionKey = item.key;
+      populateSimpleRadiusdOption(item);
+      renderSimpleRadiusdOptions(items);
+    });
+    row.appendChild(button);
+    container.appendChild(row);
+  });
+}
+
+async function toggleSimpleRadiusdOptionState(option, shouldBeActive) {
+  const value = (document.getElementById('simple-radiusd-option-value').value || option.value || '').trim();
+  const data = await api('/api/simple-config/radiusd/option/state', {
+    method: 'POST',
+    body: JSON.stringify({
+      key: option.key,
+      active: shouldBeActive,
+      value,
+    }),
+  });
+
+  setSimpleRadiusdStatus(
+    `${data.key} is now ${data.active ? 'active' : 'commented/default'}.`,
+    'success',
+  );
+  setMessage(`Updated state for radiusd option '${data.key}'.`);
+  await refreshStatus();
+  await loadSimpleSections();
+}
+
+function populateSimpleRadiusdOption(option) {
+  document.getElementById('simple-radiusd-form-title').textContent = option.label;
+  document.getElementById('simple-radiusd-form-desc').textContent = option.description || '';
+  const state = option.active === false ? 'commented/default' : 'active';
+  document.getElementById('simple-radiusd-form-meta').textContent = `Section: ${option.section} • Type: ${option.type} • State: ${state}`;
+
+  const input = document.getElementById('simple-radiusd-option-value');
+  const codeArea = document.getElementById('simple-radiusd-code-entry');
+  const saveButton = document.getElementById('save-simple-radiusd-option');
+  const isEditable = option.editable !== false;
+  const isCodeEntry = option.type === 'code' || !isEditable;
+
+  input.value = option.value || '';
+  input.dataset.optionType = option.type || 'text';
+  input.dataset.optionKey = option.key || '';
+  input.dataset.optionChoices = JSON.stringify(option.choices || []);
+  input.dataset.optionEditable = isEditable ? 'true' : 'false';
+  input.classList.remove('input-error');
+
+  if (isCodeEntry) {
+    codeArea.value = option.value || '';
+    codeArea.classList.remove('hidden');
+    input.classList.add('hidden');
+    input.disabled = true;
+    saveButton.disabled = true;
+    setSimpleRadiusdStatus('Code entry is read-only in this view.', 'warning');
+  } else {
+    codeArea.value = '';
+    codeArea.classList.add('hidden');
+    input.classList.remove('hidden');
+    input.disabled = false;
+    saveButton.disabled = false;
+    setSimpleRadiusdStatus('');
+  }
+}
+
+function clearSimpleRadiusdOptionForm() {
+  document.getElementById('simple-radiusd-form-title').textContent = 'Select an option';
+  document.getElementById('simple-radiusd-form-desc').textContent = '';
+  document.getElementById('simple-radiusd-form-meta').textContent = '';
+  const input = document.getElementById('simple-radiusd-option-value');
+  const codeArea = document.getElementById('simple-radiusd-code-entry');
+  const saveButton = document.getElementById('save-simple-radiusd-option');
+  input.value = '';
+  input.dataset.optionType = 'text';
+  input.dataset.optionKey = '';
+  input.dataset.optionChoices = '[]';
+  input.dataset.optionEditable = 'true';
+  input.classList.remove('input-error');
+  input.classList.remove('hidden');
+  input.disabled = false;
+  codeArea.value = '';
+  codeArea.classList.add('hidden');
+  saveButton.disabled = false;
+  setSimpleRadiusdStatus('');
+}
+
+function validateSimpleRadiusdInput(optionType, rawValue, choices) {
+  const value = rawValue.trim();
+  if (optionType === 'number' && value && !/^\d+$/.test(value)) {
+    return { ok: false, error: 'Value must be a whole number.' };
+  }
+  if (optionType === 'boolean') {
+    const normalized = value.toLowerCase();
+    if (!['yes', 'no', 'true', 'false', '1', '0'].includes(normalized)) {
+      return { ok: false, error: 'Boolean value must be yes/no.' };
+    }
+  }
+  if (optionType === 'select' && choices.length > 0 && !choices.includes(value)) {
+    return { ok: false, error: `Value must be one of: ${choices.join(', ')}` };
+  }
+  return { ok: true };
+}
+
+async function saveSimpleRadiusdOption() {
+  const input = document.getElementById('simple-radiusd-option-value');
+  if (input.dataset.optionEditable === 'false') {
+    throw new Error('Selected entry is code-only and read-only in this form.');
+  }
+  const optionKey = input.dataset.optionKey || selectedSimpleRadiusdOptionKey;
+  if (!optionKey) {
+    throw new Error('Select a radiusd option first.');
+  }
+
+  const optionType = input.dataset.optionType || 'text';
+  let choices = [];
+  try {
+    choices = JSON.parse(input.dataset.optionChoices || '[]');
+    if (!Array.isArray(choices)) {
+      choices = [];
+    }
+  } catch {
+    choices = [];
+  }
+
+  const value = input.value.trim();
+  const validation = validateSimpleRadiusdInput(optionType, value, choices);
+  if (!validation.ok) {
+    input.classList.add('input-error');
+    setSimpleRadiusdStatus(validation.error || 'Invalid value.', 'error');
+    throw new Error(validation.error || 'Invalid value.');
+  }
+  input.classList.remove('input-error');
+
+  const data = await api('/api/simple-config/radiusd/option', {
+    method: 'POST',
+    body: JSON.stringify({ key: optionKey, value }),
+  });
+
+  setSimpleRadiusdStatus(`Saved ${data.key}.`, 'success');
+  setMessage(`Saved radiusd option '${data.key}'.`);
+  await refreshStatus();
+  await loadSimpleSections();
+}
+
+function populateSimpleClientForm(client) {
+  document.getElementById('simple-client-form-title').textContent = `Client: ${client.name}`;
+  document.getElementById('simple-client-name').value = client.name || '';
+  document.getElementById('simple-client-ipaddr').value = client.ipaddr || '';
+  document.getElementById('simple-client-ipv4addr').value = client.ipv4addr || '';
+  document.getElementById('simple-client-ipv6addr').value = client.ipv6addr || '';
+  document.getElementById('simple-client-secret').value = client.secret || '';
+  document.getElementById('simple-client-nastype').value = client.nastype || '';
+  document.getElementById('simple-client-shortname').value = client.shortname || '';
+  document.getElementById('simple-client-proto').value = client.proto || '';
+  document.getElementById('simple-client-virtual-server').value = client.virtual_server || '';
+  document.getElementById('simple-client-require-ma').checked = Boolean(client.require_message_authenticator);
+  document.getElementById('simple-client-limit-max-connections').value = client.limit?.max_connections || '';
+  document.getElementById('simple-client-limit-lifetime').value = client.limit?.lifetime || '';
+  document.getElementById('simple-client-limit-idle-timeout').value = client.limit?.idle_timeout || '';
+  document.getElementById('simple-client-meta').textContent = `Source: ${client.source_path}`;
+  document.getElementById('simple-client-source-path').value = client.source_path || '';
+  document.getElementById('simple-client-name').readOnly = true;
+  document.getElementById('add-simple-client').disabled = true;
+  document.getElementById('save-simple-client').disabled = false;
+  document.getElementById('delete-simple-client').disabled = false;
+  updateSimpleClientSecretAccess(Boolean(client.has_secret));
+  clearSimpleClientFieldErrors();
+  setSimpleClientStatus('Editing existing client.', 'muted');
+}
+
+function prepareNewSimpleClient() {
+  selectedSimpleClientId = '';
+  document.getElementById('simple-client-form-title').textContent = 'Add new client';
+  document.getElementById('simple-client-name').value = '';
+  document.getElementById('simple-client-ipaddr').value = '';
+  document.getElementById('simple-client-ipv4addr').value = '';
+  document.getElementById('simple-client-ipv6addr').value = '';
+  document.getElementById('simple-client-secret').value = '';
+  document.getElementById('simple-client-nastype').value = 'other';
+  document.getElementById('simple-client-shortname').value = '';
+  document.getElementById('simple-client-proto').value = '';
+  document.getElementById('simple-client-virtual-server').value = '';
+  document.getElementById('simple-client-require-ma').checked = false;
+  document.getElementById('simple-client-limit-max-connections').value = '';
+  document.getElementById('simple-client-limit-lifetime').value = '';
+  document.getElementById('simple-client-limit-idle-timeout').value = '';
+  document.getElementById('simple-client-meta').textContent = 'New client will be added to selected source file.';
+  document.getElementById('simple-client-name').readOnly = false;
+  document.getElementById('add-simple-client').disabled = false;
+  document.getElementById('save-simple-client').disabled = true;
+  document.getElementById('delete-simple-client').disabled = true;
+  updateSimpleClientSecretAccess(false);
+  clearSimpleClientFieldErrors();
+  setSimpleClientStatus('Enter client values and click Add client.', 'muted');
+  renderSimpleClientsList(simpleSectionsData.clients?.items || []);
+}
+
+function renderSimpleClientsList(items) {
+  const container = document.getElementById('simple-clients-list');
+  container.innerHTML = '';
+
+  if (!items.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = 'No client blocks found.';
+    container.appendChild(empty);
+    return;
+  }
+
+  items.forEach((client) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `sidebar-btn${client.id === selectedSimpleClientId ? ' active' : ''}`;
+    button.textContent = client.name;
+    button.title = `${client.source_file}: ${client.ipaddr || client.ipv4addr || client.ipv6addr || 'no address'}`;
+    button.addEventListener('click', () => {
+      selectedSimpleClientId = client.id;
+      populateSimpleClientForm(client);
+      renderSimpleClientsList(items);
+    });
+    container.appendChild(button);
+  });
+}
+
 async function loadSimpleSections() {
   const data = await api('/api/simple-config/sections');
   renderSimpleSectionsData(data);
   setMessage('Loaded simple config sections.');
+}
+
+async function loadCurrentUserPermissions() {
+  const data = await api('/api/auth/me');
+  const permissions = Array.isArray(data.permissions) ? data.permissions : [];
+  currentUserPermissions = new Set(permissions);
 }
 
 async function loadSimplePolicySelection() {
@@ -329,24 +841,65 @@ async function applySimpleConfig() {
 }
 
 async function addSimpleClient() {
-  const payload = {
-    name: document.getElementById('simple-add-client-name').value.trim(),
-    ipaddr: document.getElementById('simple-add-client-ipaddr').value.trim(),
-    secret: document.getElementById('simple-add-client-secret').value.trim(),
-    nastype: document.getElementById('simple-add-client-nastype').value.trim(),
-    require_message_authenticator: document.getElementById('simple-add-client-require-ma').checked,
-  };
+  const payload = collectSimpleClientFormPayload();
+  if (!validateSimpleClientPayload(payload, 'add')) {
+    throw new Error('Client form validation failed.');
+  }
+
   const data = await api('/api/simple-config/clients/add', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
 
+  setSimpleClientStatus(`Added new client '${data.client}'.`, 'success');
   setMessage(`Added new client '${data.client}'.`);
-  document.getElementById('simple-add-client-name').value = '';
-  document.getElementById('simple-add-client-ipaddr').value = '';
-  document.getElementById('simple-add-client-secret').value = '';
-  document.getElementById('simple-add-client-nastype').value = '';
-  document.getElementById('simple-add-client-require-ma').checked = false;
+  await refreshStatus();
+  await loadSimpleSections();
+}
+
+async function updateSimpleClient() {
+  if (!selectedSimpleClientId) {
+    throw new Error('Select a client to update.');
+  }
+  const payload = {
+    id: selectedSimpleClientId,
+    ...collectSimpleClientFormPayload(),
+  };
+
+  if (!validateSimpleClientPayload(payload, 'update')) {
+    throw new Error('Client form validation failed.');
+  }
+
+  const data = await api('/api/simple-config/clients/update', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
+  setSimpleClientStatus(`Updated client '${data.client}'.`, 'success');
+  setMessage(`Updated client '${data.client}'.`);
+  await refreshStatus();
+  await loadSimpleSections();
+}
+
+async function deleteSimpleClient() {
+  if (!selectedSimpleClientId) {
+    throw new Error('Select a client to delete.');
+  }
+
+  const selectedClient = (simpleSectionsData.clients?.items || []).find((item) => item.id === selectedSimpleClientId);
+  const clientName = selectedClient?.name || 'selected client';
+  const confirmed = window.confirm(`Delete client '${clientName}'?`);
+  if (!confirmed) {
+    return;
+  }
+
+  const data = await api('/api/simple-config/clients/delete', {
+    method: 'POST',
+    body: JSON.stringify({ id: selectedSimpleClientId, confirmed: true }),
+  });
+  setSimpleClientStatus(`Deleted client '${data.client}'.`, 'success');
+  setMessage(`Deleted client '${data.client}'.`);
+  selectedSimpleClientId = '';
   await refreshStatus();
   await loadSimpleSections();
 }
@@ -691,6 +1244,70 @@ function renderTabState(activeTab) {
   } catch {
     // Ignore browser storage failures.
   }
+}
+
+function loadSidebarState() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SIDEBAR_STATE_STORAGE_KEY) || '{}');
+    sidebarState = parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    sidebarState = {};
+  }
+}
+
+function persistSidebarState() {
+  try {
+    localStorage.setItem(SIDEBAR_STATE_STORAGE_KEY, JSON.stringify(sidebarState));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function applySidebarCollapseState(sidebarKey) {
+  const sidebar = document.querySelector(`[data-collapsible-sidebar='${sidebarKey}']`);
+  if (!sidebar) {
+    return;
+  }
+
+  const collapsed = Boolean(sidebarState[sidebarKey]);
+  sidebar.classList.toggle('is-collapsed', collapsed);
+
+  const layout = sidebar.closest('.config-layout, .simple-layout, .cert-layout, .simple-clients-layout');
+  if (layout) {
+    layout.classList.toggle('sidebar-collapsed', collapsed);
+  }
+
+  document.querySelectorAll(`[data-toggle-sidebar='${sidebarKey}']`).forEach((button) => {
+    button.textContent = collapsed ? 'Expand' : 'Collapse';
+    button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    button.setAttribute('title', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+  });
+}
+
+function initializeCollapsibleSidebars() {
+  loadSidebarState();
+
+  const keys = new Set();
+  document.querySelectorAll('[data-collapsible-sidebar]').forEach((sidebar) => {
+    const key = sidebar.getAttribute('data-collapsible-sidebar');
+    if (key) {
+      keys.add(key);
+    }
+  });
+
+  document.querySelectorAll('[data-toggle-sidebar]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const key = button.getAttribute('data-toggle-sidebar');
+      if (!key) {
+        return;
+      }
+      sidebarState[key] = !Boolean(sidebarState[key]);
+      persistSidebarState();
+      applySidebarCollapseState(key);
+    });
+  });
+
+  keys.forEach((key) => applySidebarCollapseState(key));
 }
 
 function renderCertSection(sectionName) {
@@ -1117,6 +1734,58 @@ document.getElementById('add-simple-client').addEventListener('click', async () 
   }
 });
 
+document.getElementById('save-simple-radiusd-option').addEventListener('click', async () => {
+  try {
+    await saveSimpleRadiusdOption();
+  } catch (error) {
+    setMessage(error.message, true);
+  }
+});
+
+document.getElementById('simple-radiusd-show-commented').addEventListener('change', (event) => {
+  showCommentedRadiusdOptions = Boolean(event.target.checked);
+  renderSimpleRadiusdFromState();
+});
+
+document.getElementById('simple-radiusd-view-directives').addEventListener('click', () => {
+  simpleRadiusdViewMode = 'directives';
+  renderSimpleRadiusdFromState();
+});
+
+document.getElementById('simple-radiusd-view-structure').addEventListener('click', () => {
+  simpleRadiusdViewMode = 'structure';
+  renderSimpleRadiusdFromState();
+});
+
+document.getElementById('save-simple-client').addEventListener('click', async () => {
+  try {
+    await updateSimpleClient();
+  } catch (error) {
+    setMessage(error.message, true);
+  }
+});
+
+document.getElementById('delete-simple-client').addEventListener('click', async () => {
+  try {
+    await deleteSimpleClient();
+  } catch (error) {
+    setMessage(error.message, true);
+  }
+});
+
+document.getElementById('simple-new-client').addEventListener('click', () => {
+  prepareNewSimpleClient();
+});
+
+document.getElementById('simple-client-secret-toggle').addEventListener('click', () => {
+  if (!canViewSimpleClientSecrets()) {
+    setSimpleClientStatus('Viewing secrets requires RBAC permission: client_secret_view.', 'warning');
+    return;
+  }
+  const secretInput = document.getElementById('simple-client-secret');
+  setSimpleClientSecretVisibility(secretInput.type === 'password');
+});
+
 document.getElementById('add-simple-policy').addEventListener('click', async () => {
   try {
     await addSimplePolicy();
@@ -1321,6 +1990,7 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
 
 (async () => {
   try {
+    initializeCollapsibleSidebars();
     applyInterfaceSettings(getInterfaceSettings());
     renderTabState(getInitialTab());
     renderCertSection(selectedCertSection);
@@ -1329,6 +1999,7 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
     renderFiles();
 
     await refreshStatus();
+    await loadCurrentUserPermissions();
     if (appConfigs.length > 0 && selectedConfigKey) {
       await loadConfig();
     } else {

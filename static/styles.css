@@ -161,6 +161,10 @@ body {
   gap: 1rem;
 }
 
+.config-layout.sidebar-collapsed {
+  grid-template-columns: 84px 1fr;
+}
+
 .config-sidebar {
   border-right: 1px solid var(--color-panel-border);
   padding-right: 1rem;
@@ -170,6 +174,10 @@ body {
   display: grid;
   grid-template-columns: 260px 1fr;
   gap: 1rem;
+}
+
+.cert-layout.sidebar-collapsed {
+  grid-template-columns: 84px 1fr;
 }
 
 .cert-sidebar {
@@ -187,6 +195,10 @@ body {
   gap: 1rem;
 }
 
+.simple-layout.sidebar-collapsed {
+  grid-template-columns: 84px 1fr;
+}
+
 .simple-sidebar {
   border-right: 1px solid var(--color-panel-border);
   padding-right: 1rem;
@@ -194,6 +206,86 @@ body {
 
 .simple-main {
   min-width: 0;
+}
+
+.simple-clients-layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 0.75rem;
+}
+
+.simple-clients-layout.sidebar-collapsed {
+  grid-template-columns: 84px 1fr;
+}
+
+.simple-clients-sidebar {
+  border: 1px solid var(--color-panel-border);
+  border-radius: 8px;
+  padding: 0.6rem;
+  background: var(--color-pre-bg);
+  max-height: 640px;
+  overflow: auto;
+}
+
+[data-collapsible-sidebar].is-collapsed {
+  overflow: hidden;
+}
+
+[data-collapsible-sidebar].is-collapsed > :not(:first-child) {
+  display: none;
+}
+
+[data-collapsible-sidebar].is-collapsed .row.between h3 {
+  display: none;
+}
+
+.sidebar-collapse-btn {
+  font-size: 0.82rem;
+  padding: 0.3rem 0.45rem;
+}
+
+.simple-clients-main {
+  min-width: 0;
+}
+
+#simple-radiusd-options {
+  max-height: 540px;
+  overflow: auto;
+  padding-right: 0.2rem;
+}
+
+.simple-radiusd-option-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.simple-radiusd-option-row input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+}
+
+#simple-radiusd-view-mode .sidebar-btn {
+  flex: 1;
+}
+
+.simple-secret-row {
+  align-items: stretch;
+}
+
+.simple-secret-row input {
+  margin-bottom: 0;
+}
+
+.simple-secret-row button {
+  white-space: nowrap;
+}
+
+.icon-btn {
+  min-width: 2.4rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 1rem;
+  line-height: 1;
 }
 
 .simple-actions {
@@ -242,6 +334,12 @@ select {
   border: 1px solid var(--color-input-border);
   background: var(--color-input-bg);
   color: var(--color-text);
+}
+
+input.input-error,
+select.input-error,
+textarea.input-error {
+  border-color: var(--color-error);
 }
 
 textarea {
@@ -400,6 +498,10 @@ pre {
   }
 
   .simple-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .simple-clients-layout {
     grid-template-columns: 1fr;
   }
 

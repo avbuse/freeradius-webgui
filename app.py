@@ -124,14 +124,26 @@ def create_app() -> Flask:
     @app.get("/api/auth/me")
     @require_auth
     def whoami() -> Any:
+        permissions = session.get("permissions", [])
+        if not isinstance(permissions, list):
+            permissions = []
+        roles = session.get("roles", [])
+        if not isinstance(roles, list):
+            roles = []
+
+        if bool(session.get("is_env_admin", False)) or SYSTEM_SUPER_ADMIN_ROLE in roles:
+            effective_permissions = sorted(ALL_PERMISSION_NAMES)
+        else:
+            effective_permissions = permissions
+
         return jsonify(
             {
                 "ok": True,
                 "principal": session.get("principal"),
                 "display_name": session.get("display_name"),
                 "provider": session.get("provider"),
-                "roles": session.get("roles", []),
-                "permissions": session.get("permissions", []),
+                "roles": roles,
+                "permissions": effective_permissions,
                 "is_env_admin": bool(session.get("is_env_admin", False)),
             }
         )
@@ -504,7 +516,15 @@ def create_app() -> Flask:
 
         try:
             radiusd_content = radiusd_path.read_text(encoding="utf-8") if radiusd_path.exists() else ""
+            radiusd_options = build_simple_radiusd_options(radiusd_content)
+            radiusd_directive_items = [item for item in radiusd_options if item.get("editable", True)]
+            radiusd_structure_items = [item for item in radiusd_options if item.get("editable") is False]
             clients_content = clients_path.read_text(encoding="utf-8") if clients_path.exists() else ""
+            clients_index = build_simple_clients_index(
+                settings,
+                include_secrets=session_has_permission("client_secret_view"),
+            )
+            clients_sources = sorted({item["source_path"] for item in clients_index})
             policy_files = []
             if policy_dir.exists() and policy_dir.is_dir():
                 for item in sorted(policy_dir.iterdir()):
@@ -517,8 +537,19 @@ def create_app() -> Flask:
         return jsonify(
             {
                 "ok": True,
-                "radiusd": {"path": str(radiusd_path), "content": radiusd_content},
-                "clients": {"path": str(clients_path), "content": clients_content},
+                "radiusd": {
+                    "path": str(radiusd_path),
+                    "content": radiusd_content,
+                    "items": radiusd_options,
+                    "directive_items": radiusd_directive_items,
+                    "structure_items": radiusd_structure_items,
+                },
+                "clients": {
+                    "path": str(clients_path),
+                    "content": clients_content,
+                    "items": clients_index,
+                    "sources": clients_sources,
+                },
                 "policy": {"directory": str(policy_dir), "files": policy_files},
             }
         )
@@ -545,40 +576,176 @@ def create_app() -> Flask:
 
         return jsonify({"ok": True, "name": filename, "path": str(policy_path), "content": content})
 
+    @app.post("/api/simple-config/radiusd/option")
+    @require_auth
+    @require_permission("simple_config_apply")
+    def simple_config_update_radiusd_option() -> Any:
+        payload = request.get_json(silent=True) or {}
+        option_key = str(payload.get("key", "")).strip()
+        value = str(payload.get("value", "")).strip()
+
+        radiusd_path = settings.freeradius_config_root / "radiusd.conf"
+        try:
+            current_text = radiusd_path.read_text(encoding="utf-8") if radiusd_path.exists() else ""
+            option_index = build_simple_radiusd_option_index(current_text)
+            option_spec = option_index.get(option_key)
+            if not option_spec:
+                return jsonify({"ok": False, "error": "Unknown radiusd option."}), 400
+            if option_spec.get("editable") is False:
+                return jsonify({"ok": False, "error": "This entry is code-only and not editable from this control."}), 400
+
+            if option_spec["type"] == "number" and value and not re.fullmatch(r"\d+", value):
+                return jsonify({"ok": False, "error": "Value must be a whole number."}), 400
+            if option_spec["type"] == "boolean":
+                normalized = value.lower()
+                if normalized not in {"yes", "no", "true", "false", "1", "0"}:
+                    return jsonify({"ok": False, "error": "Boolean options must be yes/no."}), 400
+                value = "yes" if normalized in {"yes", "true", "1"} else "no"
+            if option_spec["type"] == "select":
+                allowed = option_spec.get("choices", [])
+                if value not in allowed:
+                    return jsonify({"ok": False, "error": f"Value must be one of: {', '.join(allowed)}"}), 400
+
+            section = str(option_spec.get("section", "global"))
+            if section == "global":
+                updated_text, _ = set_assignment_value(current_text, option_spec["directive"], value)
+            else:
+                updated_text = set_block_assignment_value(
+                    current_text,
+                    section_name=section,
+                    key=option_spec["directive"],
+                    value=value,
+                )
+
+            result, status_code = apply_text_to_path_with_validation(
+                settings=settings,
+                path=radiusd_path,
+                content=updated_text,
+                restart_after=True,
+            )
+            if not result.get("ok"):
+                return jsonify(result), status_code
+        except OSError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
+
+        return jsonify({"ok": True, "key": option_key, "value": value})
+
+    @app.post("/api/simple-config/radiusd/option/state")
+    @require_auth
+    @require_permission("simple_config_apply")
+    def simple_config_set_radiusd_option_state() -> Any:
+        payload = request.get_json(silent=True) or {}
+        option_key = str(payload.get("key", "")).strip()
+        should_be_active = bool(payload.get("active", True))
+        value = str(payload.get("value", "")).strip()
+
+        radiusd_path = settings.freeradius_config_root / "radiusd.conf"
+        try:
+            current_text = radiusd_path.read_text(encoding="utf-8") if radiusd_path.exists() else ""
+            option_index = build_simple_radiusd_option_index(current_text)
+            option_spec = option_index.get(option_key)
+            if not option_spec:
+                return jsonify({"ok": False, "error": "Unknown radiusd option."}), 400
+            if option_spec.get("editable") is False:
+                return jsonify({"ok": False, "error": "This entry is code-only and cannot be toggled."}), 400
+
+            if not value:
+                value = str(option_spec.get("value", "")).strip()
+            if not value:
+                option_type = str(option_spec.get("type", "text"))
+                if option_type == "boolean":
+                    value = "no"
+                elif option_type == "number":
+                    value = "0"
+                elif option_type == "select":
+                    choices = option_spec.get("choices", [])
+                    value = str(choices[0]) if isinstance(choices, list) and choices else ""
+
+            section = str(option_spec.get("section", "global"))
+            directive = str(option_spec.get("directive", "")).strip()
+            if not directive:
+                return jsonify({"ok": False, "error": "Invalid option directive."}), 400
+
+            if section == "global":
+                updated_text = set_directive_active_in_body(
+                    content=current_text,
+                    key=directive,
+                    active=should_be_active,
+                    value=value,
+                    default_indent="",
+                )
+            else:
+                updated_text = set_block_directive_active(
+                    content=current_text,
+                    section_name=section,
+                    key=directive,
+                    active=should_be_active,
+                    value=value,
+                )
+
+            result, status_code = apply_text_to_path_with_validation(
+                settings=settings,
+                path=radiusd_path,
+                content=updated_text,
+                restart_after=True,
+            )
+            if not result.get("ok"):
+                return jsonify(result), status_code
+        except OSError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
+
+        return jsonify({"ok": True, "key": option_key, "active": should_be_active})
+
+    @app.get("/api/simple-config/clients/<client_id>")
+    @require_auth
+    @require_permission("simple_config_read")
+    def simple_config_get_client(client_id: str) -> Any:
+        try:
+            client = find_simple_client_by_id(
+                settings,
+                client_id,
+                include_secrets=session_has_permission("client_secret_view"),
+            )
+        except (OSError, ValueError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+        if not client:
+            return jsonify({"ok": False, "error": "Client not found."}), 404
+
+        return jsonify({"ok": True, "client": client})
+
     @app.post("/api/simple-config/clients/add")
     @require_auth
     @require_permission("simple_config_apply")
     def simple_config_add_client() -> Any:
         payload = request.get_json(silent=True) or {}
         name = secure_filename(str(payload.get("name", "")).strip())
-        ipaddr = str(payload.get("ipaddr", "")).strip()
-        secret = str(payload.get("secret", "")).strip()
-        nastype = str(payload.get("nastype", "")).strip() or "other"
-        require_ma = bool(payload.get("require_message_authenticator", False))
+        target_path_raw = str(payload.get("target_path", "")).strip()
+        target_path = settings.freeradius_config_root / "clients.conf"
+        if target_path_raw:
+            candidate = Path(target_path_raw).resolve()
+            if not is_under_directory(candidate, settings.freeradius_config_root):
+                return jsonify({"ok": False, "error": "Invalid target clients file path."}), 400
+            target_path = candidate
+
+        client_data, error_message = normalize_simple_client_payload(payload, require_secret=True)
 
         if not name:
             return jsonify({"ok": False, "error": "Client name is required."}), 400
-        if not ipaddr:
-            return jsonify({"ok": False, "error": "Client ipaddr is required."}), 400
-        if not secret:
-            return jsonify({"ok": False, "error": "Client secret is required."}), 400
+        if error_message:
+            return jsonify({"ok": False, "error": error_message}), 400
 
-        clients_path = settings.freeradius_config_root / "clients.conf"
         try:
-            current_text = clients_path.read_text(encoding="utf-8") if clients_path.exists() else ""
-            if extract_client_block(current_text, name):
+            current_text = target_path.read_text(encoding="utf-8") if target_path.exists() else ""
+            if any(block["name"] == name for block in parse_client_blocks(current_text)):
                 return jsonify({"ok": False, "error": f"Client '{name}' already exists."}), 400
 
-            client_updates = {
-                "ipaddr": ipaddr,
-                "secret": secret,
-                "nastype": nastype,
-                "require_message_authenticator": "yes" if require_ma else "no",
-            }
-            updated_text, _ = set_client_block_values(current_text, name, client_updates)
+            block = render_simple_client_block(name, client_data)
+            separator = "" if not current_text.strip() or current_text.endswith("\n") else "\n"
+            updated_text = f"{current_text}{separator}\n{block}\n"
             result, status_code = apply_text_to_path_with_validation(
                 settings=settings,
-                path=clients_path,
+                path=target_path,
                 content=updated_text,
                 restart_after=True,
             )
@@ -588,6 +755,100 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": str(exc)}), 500
 
         return jsonify({"ok": True, "client": name})
+
+    @app.post("/api/simple-config/clients/update")
+    @require_auth
+    @require_permission("simple_config_apply")
+    def simple_config_update_client() -> Any:
+        payload = request.get_json(silent=True) or {}
+        client_id = str(payload.get("id", "")).strip()
+        if not client_id:
+            return jsonify({"ok": False, "error": "Client id is required."}), 400
+
+        try:
+            decoded = decode_simple_client_id(client_id)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+        source_path = decoded["path"]
+        if not is_allowed_simple_clients_path(settings, source_path):
+            return jsonify({"ok": False, "error": "Client source path is not allowed."}), 400
+
+        client_data, error_message = normalize_simple_client_payload(payload, require_secret=False)
+        if error_message:
+            return jsonify({"ok": False, "error": error_message}), 400
+
+        try:
+            content = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
+            blocks = parse_client_blocks(content)
+        except OSError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
+
+        block = locate_client_block(blocks, decoded)
+        if not block:
+            return jsonify({"ok": False, "error": "Client block not found."}), 404
+
+        existing_data = parse_simple_client_fields(block["body"])
+        if not client_data.get("secret"):
+            client_data["secret"] = existing_data.get("secret", "")
+
+        replacement = render_simple_client_block(decoded["name"], client_data)
+        updated_text = f"{content[:block['start']]}{replacement}{content[block['end']:] }"
+
+        result, status_code = apply_text_to_path_with_validation(
+            settings=settings,
+            path=source_path,
+            content=updated_text,
+            restart_after=True,
+        )
+        if not result.get("ok"):
+            return jsonify(result), status_code
+
+        return jsonify({"ok": True, "client": decoded["name"], "path": str(source_path)})
+
+    @app.post("/api/simple-config/clients/delete")
+    @require_auth
+    @require_permission("simple_config_apply")
+    def simple_config_delete_client() -> Any:
+        payload = request.get_json(silent=True) or {}
+        client_id = str(payload.get("id", "")).strip()
+        confirmed = bool(payload.get("confirmed", False))
+
+        if not client_id:
+            return jsonify({"ok": False, "error": "Client id is required."}), 400
+        if not confirmed:
+            return jsonify({"ok": False, "error": "Deletion not confirmed."}), 400
+
+        try:
+            decoded = decode_simple_client_id(client_id)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+        source_path = decoded["path"]
+        if not is_allowed_simple_clients_path(settings, source_path):
+            return jsonify({"ok": False, "error": "Client source path is not allowed."}), 400
+
+        try:
+            content = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
+            blocks = parse_client_blocks(content)
+        except OSError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
+
+        block = locate_client_block(blocks, decoded)
+        if not block:
+            return jsonify({"ok": False, "error": "Client block not found."}), 404
+
+        updated_text = f"{content[:block['start']].rstrip()}\n\n{content[block['end']:].lstrip()}"
+        result, status_code = apply_text_to_path_with_validation(
+            settings=settings,
+            path=source_path,
+            content=updated_text,
+            restart_after=True,
+        )
+        if not result.get("ok"):
+            return jsonify(result), status_code
+
+        return jsonify({"ok": True, "client": decoded["name"], "path": str(source_path)})
 
     @app.post("/api/simple-config/policy/add")
     @require_auth
@@ -1030,6 +1291,7 @@ PERMISSION_DEFINITIONS = [
     ("service_control", "Start/stop/restart FreeRADIUS service."),
     ("simple_config_read", "View simple configuration sections."),
     ("simple_config_apply", "Apply simple configuration changes."),
+    ("client_secret_view", "View client shared secrets in Simple Config."),
     ("advanced_config_read", "Read advanced configuration files."),
     ("advanced_config_write", "Write advanced configuration files."),
     ("advanced_config_rollback", "Rollback advanced configuration files."),
@@ -1149,6 +1411,11 @@ def is_entra_login_enabled(settings: "AppSettings") -> bool:
 
 
 def session_has_permission(permission_name: str) -> bool:
+    if bool(session.get("is_env_admin", False)):
+        return True
+    roles = session.get("roles", [])
+    if isinstance(roles, list) and SYSTEM_SUPER_ADMIN_ROLE in roles:
+        return True
     permissions = session.get("permissions", [])
     return isinstance(permissions, list) and permission_name in permissions
 
@@ -1522,8 +1789,14 @@ def require_permission(permission_name: str):
 
 def refresh_session_access_if_needed() -> None:
     permissions = session.get("permissions")
+    roles = session.get("roles", [])
     if isinstance(permissions, list):
-        return
+        if bool(session.get("is_env_admin", False)) and len(permissions) < len(ALL_PERMISSION_NAMES):
+            pass
+        elif isinstance(roles, list) and SYSTEM_SUPER_ADMIN_ROLE in roles and len(permissions) < len(ALL_PERMISSION_NAMES):
+            pass
+        else:
+            return
 
     settings = current_app.config.get("APP_SETTINGS")
     if not isinstance(settings, AppSettings):
@@ -1911,6 +2184,348 @@ SIMPLE_CORE_CLIENT_KEYS = {
     "require_message_authenticator": "require_message_authenticator",
 }
 
+SIMPLE_RADIUSD_OPTIONS: list[dict[str, Any]] = [
+    {
+        "key": "name",
+        "directive": "name",
+        "section": "global",
+        "type": "text",
+        "label": "Server name",
+        "description": "Name of the running server instance.",
+        "category": "Global",
+    },
+    {
+        "key": "pidfile",
+        "directive": "pidfile",
+        "section": "global",
+        "type": "text",
+        "label": "PID file",
+        "description": "Path where FreeRADIUS writes the PID in daemon mode.",
+        "category": "Global",
+    },
+    {
+        "key": "max_request_time",
+        "directive": "max_request_time",
+        "section": "global",
+        "type": "number",
+        "label": "max_request_time",
+        "description": "Maximum seconds to process a request.",
+        "category": "Global",
+    },
+    {
+        "key": "max_requests",
+        "directive": "max_requests",
+        "section": "global",
+        "type": "number",
+        "label": "max_requests",
+        "description": "Maximum in-flight requests tracked by server.",
+        "category": "Global",
+    },
+    {
+        "key": "reverse_lookups",
+        "directive": "reverse_lookups",
+        "section": "global",
+        "type": "boolean",
+        "label": "reverse_lookups",
+        "description": "Resolve client IP addresses to names in logs.",
+        "category": "Global",
+    },
+    {
+        "key": "hostname_lookups",
+        "directive": "hostname_lookups",
+        "section": "global",
+        "type": "boolean",
+        "label": "hostname_lookups",
+        "description": "Allow hostname resolution in configuration processing.",
+        "category": "Global",
+    },
+    {
+        "key": "log.destination",
+        "directive": "destination",
+        "section": "log",
+        "type": "select",
+        "choices": ["files", "syslog", "stdout", "stderr"],
+        "label": "log.destination",
+        "description": "Log output destination.",
+        "category": "Logging",
+    },
+    {
+        "key": "log.colourise",
+        "directive": "colourise",
+        "section": "log",
+        "type": "boolean",
+        "label": "log.colourise",
+        "description": "Enable colourized logs on terminal outputs.",
+        "category": "Logging",
+    },
+    {
+        "key": "log.timestamp",
+        "directive": "timestamp",
+        "section": "log",
+        "type": "boolean",
+        "label": "log.timestamp",
+        "description": "Force timestamps on/off for logs.",
+        "category": "Logging",
+    },
+    {
+        "key": "log.file",
+        "directive": "file",
+        "section": "log",
+        "type": "text",
+        "label": "log.file",
+        "description": "Log file path when destination is files.",
+        "category": "Logging",
+    },
+    {
+        "key": "log.syslog_facility",
+        "directive": "syslog_facility",
+        "section": "log",
+        "type": "text",
+        "label": "log.syslog_facility",
+        "description": "Syslog facility when destination is syslog.",
+        "category": "Logging",
+    },
+    {
+        "key": "security.allow_core_dumps",
+        "directive": "allow_core_dumps",
+        "section": "security",
+        "type": "boolean",
+        "label": "security.allow_core_dumps",
+        "description": "Allow core dumps for debugging.",
+        "category": "Security",
+    },
+    {
+        "key": "security.max_attributes",
+        "directive": "max_attributes",
+        "section": "security",
+        "type": "number",
+        "label": "security.max_attributes",
+        "description": "Max packet attributes before request drop.",
+        "category": "Security",
+    },
+    {
+        "key": "security.allow_vulnerable_openssl",
+        "directive": "allow_vulnerable_openssl",
+        "section": "security",
+        "type": "boolean",
+        "label": "security.allow_vulnerable_openssl",
+        "description": "Allow startup with vulnerable OpenSSL versions.",
+        "category": "Security",
+    },
+    {
+        "key": "security.openssl_fips_mode",
+        "directive": "openssl_fips_mode",
+        "section": "security",
+        "type": "boolean",
+        "label": "security.openssl_fips_mode",
+        "description": "Enable OpenSSL FIPS mode.",
+        "category": "Security",
+    },
+    {
+        "key": "thread_pool.num_workers",
+        "directive": "num_workers",
+        "section": "thread pool",
+        "type": "number",
+        "label": "thread_pool.num_workers",
+        "description": "Number of worker threads.",
+        "category": "Thread Pool",
+    },
+    {
+        "key": "thread_pool.openssl_async_pool_init",
+        "directive": "openssl_async_pool_init",
+        "section": "thread pool",
+        "type": "number",
+        "label": "thread_pool.openssl_async_pool_init",
+        "description": "Initial OpenSSL async contexts per worker.",
+        "category": "Thread Pool",
+    },
+    {
+        "key": "thread_pool.openssl_async_pool_max",
+        "directive": "openssl_async_pool_max",
+        "section": "thread pool",
+        "type": "number",
+        "label": "thread_pool.openssl_async_pool_max",
+        "description": "Max OpenSSL async contexts per worker.",
+        "category": "Thread Pool",
+    },
+]
+
+SIMPLE_RADIUSD_OPTION_INDEX = {item["key"]: item for item in SIMPLE_RADIUSD_OPTIONS}
+
+
+def make_simple_radiusd_option_key(section: str, directive: str) -> str:
+    if section == "global":
+        return directive
+    return f"{section.replace(' ', '_')}.{directive}"
+
+
+def infer_radiusd_option_type(value: str) -> str:
+    text = value.strip().lower()
+    if text in {"yes", "no", "true", "false", "1", "0", "on", "off"}:
+        return "boolean"
+    if re.fullmatch(r"\d+", text):
+        return "number"
+    return "text"
+
+
+def parse_simple_radiusd_assignments(radiusd_content: str) -> dict[str, dict[str, str]]:
+    assignments: dict[str, dict[str, str]] = {"global": {}}
+    section_stack: list[str] = []
+
+    for raw_line in radiusd_content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        open_match = re.match(r"^([A-Za-z0-9_.\- ]+)\s*\{\s*$", line)
+        if open_match:
+            section_name = open_match.group(1).strip()
+            section_stack.append(section_name)
+            continue
+
+        if line == "}":
+            if section_stack:
+                section_stack.pop()
+            continue
+
+        assign_match = re.match(r"^([A-Za-z0-9_.\-]+)\s*=\s*(.*?)\s*(?:#.*)?$", line)
+        if not assign_match:
+            continue
+
+        directive = assign_match.group(1).strip()
+        value = assign_match.group(2).strip()
+
+        section = section_stack[0] if section_stack else "global"
+        if section not in assignments:
+            assignments[section] = {}
+        assignments[section][directive] = value
+
+    return assignments
+
+
+def parse_simple_radiusd_commented_assignments(radiusd_content: str) -> dict[str, dict[str, str]]:
+    assignments: dict[str, dict[str, str]] = {"global": {}}
+    section_stack: list[str] = []
+
+    for raw_line in radiusd_content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        open_match = re.match(r"^([A-Za-z0-9_.\- ]+)\s*\{\s*$", line)
+        if open_match:
+            section_name = open_match.group(1).strip()
+            section_stack.append(section_name)
+            continue
+
+        if line == "}":
+            if section_stack:
+                section_stack.pop()
+            continue
+
+        commented_match = re.match(r"^#\s*([A-Za-z0-9_.\-]+)\s*=\s*(.*?)\s*(?:#.*)?$", line)
+        if not commented_match:
+            continue
+
+        directive = commented_match.group(1).strip()
+        value = commented_match.group(2).strip()
+        section = section_stack[0] if section_stack else "global"
+
+        if section not in assignments:
+            assignments[section] = {}
+        assignments[section].setdefault(directive, value)
+
+    return assignments
+
+
+def parse_simple_radiusd_structural_entries(radiusd_content: str) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+
+    section_stack: list[str] = []
+    include_index = 0
+    for raw_line in radiusd_content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        open_match = re.match(r"^([A-Za-z0-9_.\- ]+)\s*\{\s*$", line)
+        if open_match and not line.startswith("#"):
+            section_stack.append(open_match.group(1).strip())
+
+        section = section_stack[0] if section_stack else "global"
+
+        include_active = re.match(r"^\$INCLUDE\s+(.+)$", line)
+        include_commented = re.match(r"^#\s*\$INCLUDE\s+(.+)$", line)
+        if include_active or include_commented:
+            include_index += 1
+            target = (include_active or include_commented).group(1).strip()
+            is_active = include_active is not None
+            entries.append(
+                {
+                    "key": f"code.include.{section.replace(' ', '_').lower()}.{include_index}",
+                    "directive": "$INCLUDE",
+                    "section": section,
+                    "type": "code",
+                    "label": f"$INCLUDE {target}",
+                    "description": "Include directive entry from radiusd.conf.",
+                    "category": "Code",
+                    "choices": [],
+                    "value": line,
+                    "active": is_active,
+                    "source": "active" if is_active else "commented",
+                    "editable": False,
+                }
+            )
+
+        if line == "}" and section_stack:
+            section_stack.pop()
+
+    lines = radiusd_content.splitlines(keepends=True)
+    depth = 0
+    block_start_offset: int | None = None
+    block_name = ""
+    block_index = 0
+    offset = 0
+
+    for line in lines:
+        stripped = line.strip()
+
+        if block_start_offset is None and depth == 0 and stripped and not stripped.startswith("#"):
+            block_match = re.match(r"^([A-Za-z0-9_.\- ]+)\s*\{\s*$", stripped)
+            if block_match:
+                block_start_offset = offset
+                block_name = block_match.group(1).strip()
+
+        if not stripped.startswith("#"):
+            depth += line.count("{")
+            depth -= line.count("}")
+
+        if block_start_offset is not None and depth == 0:
+            block_index += 1
+            block_text = radiusd_content[block_start_offset : offset + len(line)].strip()
+            entries.append(
+                {
+                    "key": f"code.block.{block_name.replace(' ', '_').lower()}.{block_index}",
+                    "directive": block_name,
+                    "section": "global",
+                    "type": "code",
+                    "label": f"{block_name} {{...}}",
+                    "description": "Top-level code block entry from radiusd.conf.",
+                    "category": "Code",
+                    "choices": [],
+                    "value": block_text,
+                    "active": True,
+                    "source": "active",
+                    "editable": False,
+                }
+            )
+            block_start_offset = None
+            block_name = ""
+
+        offset += len(line)
+
+    return entries
+
 
 def build_simple_config_snapshot(settings: AppSettings) -> dict[str, Any]:
     root = settings.freeradius_config_root
@@ -1989,6 +2604,220 @@ def set_assignment_value(content: str, key: str, value: str) -> tuple[str, bool]
     return f"{content}{suffix}{key} = {value}\n", True
 
 
+def set_assignment_value_with_indent(content: str, key: str, value: str, indent: str) -> tuple[str, bool]:
+    pattern = re.compile(rf"(?m)^(\s*{re.escape(key)}\s*=\s*)([^#\n]+)(.*)$")
+
+    def replace(match: re.Match[str]) -> str:
+        return f"{match.group(1)}{value}{match.group(3)}"
+
+    updated, count = pattern.subn(replace, content, count=1)
+    if count > 0:
+        return updated, True
+
+    suffix = "" if content.endswith("\n") or not content else "\n"
+    return f"{content}{suffix}{indent}{key} = {value}\n", True
+
+
+def extract_named_block(content: str, section_name: str) -> dict[str, Any] | None:
+    pattern = re.compile(rf"(?m)^\s*{re.escape(section_name)}\s*\{{")
+    match = pattern.search(content)
+    if not match:
+        return None
+
+    open_brace_index = content.find("{", match.start())
+    if open_brace_index == -1:
+        return None
+
+    depth = 0
+    end_index = None
+    for index in range(open_brace_index, len(content)):
+        char = content[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                end_index = index + 1
+                break
+
+    if end_index is None:
+        return None
+
+    return {
+        "start": match.start(),
+        "body_start": open_brace_index + 1,
+        "body_end": end_index - 1,
+        "end": end_index,
+        "body": content[open_brace_index + 1 : end_index - 1],
+    }
+
+
+def set_block_assignment_value(content: str, section_name: str, key: str, value: str) -> str:
+    block = extract_named_block(content, section_name)
+    if not block:
+        suffix = "" if not content.strip() or content.endswith("\n") else "\n"
+        return f"{content}{suffix}\n{section_name} {{\n\t{key} = {value}\n}}\n"
+
+    updated_body, _ = set_assignment_value(block["body"], key, value)
+    return f"{content[:block['body_start']]}{updated_body}{content[block['body_end']:] }"
+
+
+def set_directive_active_in_body(content: str, key: str, active: bool, value: str, default_indent: str) -> str:
+    active_pattern = re.compile(rf"(?m)^(\s*){re.escape(key)}\s*=\s*(.*)$")
+    commented_pattern = re.compile(rf"(?m)^(\s*)#\s*{re.escape(key)}\s*=\s*(.*)$")
+
+    if active:
+        if active_pattern.search(content):
+            return content
+        commented_match = commented_pattern.search(content)
+        if commented_match:
+            def uncomment(match: re.Match[str]) -> str:
+                return f"{match.group(1)}{key} = {match.group(2)}"
+
+            return commented_pattern.sub(uncomment, content, count=1)
+
+        updated, _ = set_assignment_value_with_indent(content, key, value, default_indent)
+        return updated
+
+    if commented_pattern.search(content):
+        return content
+
+    def comment(match: re.Match[str]) -> str:
+        return f"{match.group(1)}# {key} = {match.group(2)}"
+
+    updated, _ = active_pattern.subn(comment, content, count=1)
+    return updated
+
+
+def set_block_directive_active(content: str, section_name: str, key: str, active: bool, value: str) -> str:
+    block = extract_named_block(content, section_name)
+    if not block:
+        if not active:
+            return content
+        suffix = "" if not content.strip() or content.endswith("\n") else "\n"
+        return f"{content}{suffix}\n{section_name} {{\n\t{key} = {value}\n}}\n"
+
+    updated_body = set_directive_active_in_body(
+        content=block["body"],
+        key=key,
+        active=active,
+        value=value,
+        default_indent="\t",
+    )
+    return f"{content[:block['body_start']]}{updated_body}{content[block['body_end']:] }"
+
+
+def build_simple_radiusd_options(radiusd_content: str) -> list[dict[str, Any]]:
+    parsed_assignments = parse_simple_radiusd_assignments(radiusd_content)
+    parsed_commented_assignments = parse_simple_radiusd_commented_assignments(radiusd_content)
+    structural_entries = parse_simple_radiusd_structural_entries(radiusd_content)
+
+    result: list[dict[str, Any]] = []
+    for option in SIMPLE_RADIUSD_OPTIONS:
+        section = option["section"]
+        directive = option["directive"]
+
+        raw_value = parsed_assignments.get(section, {}).get(directive)
+        is_active = raw_value is not None
+        if raw_value is None:
+            raw_value = parsed_commented_assignments.get(section, {}).get(directive)
+
+        value = (raw_value or "").strip()
+        if option["type"] == "boolean" and value:
+            value = "yes" if value.lower() in {"yes", "true", "1", "on"} else "no"
+
+        result.append(
+            {
+                "key": option["key"],
+                "directive": directive,
+                "section": section,
+                "type": option["type"],
+                "label": option["label"],
+                "description": option["description"],
+                "category": option["category"],
+                "choices": option.get("choices", []),
+                "value": value,
+                "active": is_active,
+                "source": "active" if is_active else ("commented" if value else "missing"),
+                "editable": True,
+            }
+        )
+
+    known_keys = {item["key"] for item in result}
+    for section_name, directives in parsed_assignments.items():
+        for directive, raw_value in directives.items():
+            key = make_simple_radiusd_option_key(section_name, directive)
+            if key in known_keys:
+                continue
+
+            inferred_type = infer_radiusd_option_type(raw_value)
+            normalized_value = raw_value.strip()
+            if inferred_type == "boolean" and normalized_value:
+                normalized_value = "yes" if normalized_value.lower() in {"yes", "true", "1", "on"} else "no"
+
+            result.append(
+                {
+                    "key": key,
+                    "directive": directive,
+                    "section": section_name,
+                    "type": inferred_type,
+                    "label": key,
+                    "description": "Discovered from current radiusd.conf.",
+                    "category": "Global" if section_name == "global" else section_name.title(),
+                    "choices": [],
+                    "value": normalized_value,
+                    "active": True,
+                    "source": "active",
+                    "editable": True,
+                }
+            )
+            known_keys.add(key)
+
+    for section_name, directives in parsed_commented_assignments.items():
+        for directive, raw_value in directives.items():
+            key = make_simple_radiusd_option_key(section_name, directive)
+            if key in known_keys:
+                continue
+
+            inferred_type = infer_radiusd_option_type(raw_value)
+            normalized_value = raw_value.strip()
+            if inferred_type == "boolean" and normalized_value:
+                normalized_value = "yes" if normalized_value.lower() in {"yes", "true", "1", "on"} else "no"
+
+            result.append(
+                {
+                    "key": key,
+                    "directive": directive,
+                    "section": section_name,
+                    "type": inferred_type,
+                    "label": key,
+                    "description": "Discovered from commented/default radiusd.conf entry.",
+                    "category": "Global" if section_name == "global" else section_name.title(),
+                    "choices": [],
+                    "value": normalized_value,
+                    "active": False,
+                    "source": "commented",
+                    "editable": True,
+                }
+            )
+            known_keys.add(key)
+
+    for entry in structural_entries:
+        entry_key = str(entry.get("key", "")).strip()
+        if not entry_key or entry_key in known_keys:
+            continue
+        result.append(entry)
+        known_keys.add(entry_key)
+
+    result.sort(key=lambda item: (item["category"], item["source"] != "active", item["label"]))
+    return result
+
+
+def build_simple_radiusd_option_index(radiusd_content: str) -> dict[str, dict[str, Any]]:
+    options = build_simple_radiusd_options(radiusd_content)
+    return {item["key"]: item for item in options}
+
+
 def extract_client_block(content: str, client_name: str) -> str | None:
     pattern = re.compile(rf"client\s+{re.escape(client_name)}\s*\{{(.*?)\}}", flags=re.DOTALL)
     match = pattern.search(content)
@@ -2011,6 +2840,279 @@ def set_client_block_values(content: str, client_name: str, updates: dict[str, s
 
     updated_content = content[: match.start()] + match.group(1) + block_body + match.group(3) + content[match.end() :]
     return updated_content, applied
+
+
+def resolve_simple_clients_config_files(config_root: Path, clients_path: Path) -> list[Path]:
+    to_visit: list[Path] = [clients_path.resolve()]
+    visited: set[str] = set()
+    result: list[Path] = []
+
+    include_pattern = re.compile(r"(?m)^\s*\$INCLUDE\s+([^\n#]+)")
+    while to_visit:
+        path = to_visit.pop(0)
+        path_key = str(path)
+        if path_key in visited:
+            continue
+        visited.add(path_key)
+        result.append(path)
+
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        for include_match in include_pattern.finditer(content):
+            include_raw = include_match.group(1).strip().strip('"').strip("'")
+            if not include_raw:
+                continue
+
+            include_path = Path(include_raw)
+            if not include_path.is_absolute():
+                include_path = (config_root / include_path).resolve()
+
+            include_values: list[Path] = []
+            if any(char in include_raw for char in ["*", "?", "["]):
+                include_values = sorted(path for path in config_root.glob(include_raw) if path.is_file())
+            elif include_path.is_dir():
+                include_values = sorted(path for path in include_path.iterdir() if path.is_file())
+            else:
+                include_values = [include_path]
+
+            for include_item in include_values:
+                resolved = include_item.resolve()
+                if is_under_directory(resolved, config_root) and str(resolved) not in visited:
+                    to_visit.append(resolved)
+
+    return [item for item in result if is_under_directory(item, config_root)]
+
+
+def parse_client_blocks(content: str) -> list[dict[str, Any]]:
+    start_pattern = re.compile(r"(?m)^\s*client\s+([^\s\{]+)\s*\{")
+    blocks: list[dict[str, Any]] = []
+
+    for block_index, match in enumerate(start_pattern.finditer(content)):
+        open_brace_index = content.find("{", match.start())
+        if open_brace_index == -1:
+            continue
+
+        depth = 0
+        end_index = None
+        for index in range(open_brace_index, len(content)):
+            char = content[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end_index = index + 1
+                    break
+
+        if end_index is None:
+            continue
+
+        body = content[open_brace_index + 1 : end_index - 1]
+        blocks.append(
+            {
+                "name": match.group(1).strip(),
+                "start": match.start(),
+                "end": end_index,
+                "body": body,
+                "index": block_index,
+            }
+        )
+
+    return blocks
+
+
+def parse_simple_client_fields(body: str) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    keys = [
+        "ipaddr",
+        "ipv4addr",
+        "ipv6addr",
+        "secret",
+        "nastype",
+        "shortname",
+        "proto",
+        "virtual_server",
+    ]
+    for key in keys:
+        result[key] = (extract_assignment_value(body, key) or "").strip()
+
+    require_ma_raw = extract_assignment_value(body, "require_message_authenticator") or ""
+    result["require_message_authenticator"] = require_ma_raw.strip().lower() in {"yes", "true", "1"}
+
+    limit_block_match = re.search(r"limit\s*\{(.*?)\}", body, flags=re.DOTALL)
+    limit_data: dict[str, str] = {}
+    if limit_block_match:
+        limit_body = limit_block_match.group(1)
+        for key in ["max_connections", "lifetime", "idle_timeout"]:
+            value = extract_assignment_value(limit_body, key)
+            if value:
+                limit_data[key] = value.strip()
+    result["limit"] = limit_data
+    return result
+
+
+def sanitize_simple_client_entry(client: dict[str, Any], include_secrets: bool) -> dict[str, Any]:
+    sanitized = dict(client)
+    secret_value = str(sanitized.get("secret", ""))
+    sanitized["has_secret"] = bool(secret_value)
+    sanitized["secret"] = secret_value if include_secrets else ""
+    return sanitized
+
+
+def normalize_simple_client_payload(payload: dict[str, Any], require_secret: bool) -> tuple[dict[str, Any], str | None]:
+    client_data: dict[str, Any] = {
+        "ipaddr": str(payload.get("ipaddr", "")).strip(),
+        "ipv4addr": str(payload.get("ipv4addr", "")).strip(),
+        "ipv6addr": str(payload.get("ipv6addr", "")).strip(),
+        "secret": str(payload.get("secret", "")).strip(),
+        "nastype": str(payload.get("nastype", "")).strip() or "other",
+        "shortname": str(payload.get("shortname", "")).strip(),
+        "proto": str(payload.get("proto", "")).strip(),
+        "virtual_server": str(payload.get("virtual_server", "")).strip(),
+        "require_message_authenticator": bool(payload.get("require_message_authenticator", False)),
+        "limit": {
+            "max_connections": str(payload.get("limit_max_connections", "")).strip(),
+            "lifetime": str(payload.get("limit_lifetime", "")).strip(),
+            "idle_timeout": str(payload.get("limit_idle_timeout", "")).strip(),
+        },
+    }
+
+    if not any([client_data["ipaddr"], client_data["ipv4addr"], client_data["ipv6addr"]]):
+        return client_data, "At least one of ipaddr, ipv4addr, or ipv6addr is required."
+    if require_secret and not client_data["secret"]:
+        return client_data, "Client secret is required."
+    return client_data, None
+
+
+def render_simple_client_block(client_name: str, client_data: dict[str, Any]) -> str:
+    lines = [f"client {client_name} {{"]
+
+    for key in ["ipaddr", "ipv4addr", "ipv6addr", "secret", "nastype", "shortname", "proto", "virtual_server"]:
+        value = str(client_data.get(key, "")).strip()
+        if value:
+            lines.append(f"\t{key} = {value}")
+
+    lines.append(
+        f"\trequire_message_authenticator = {'yes' if bool(client_data.get('require_message_authenticator')) else 'no'}"
+    )
+
+    limit = client_data.get("limit", {}) if isinstance(client_data.get("limit"), dict) else {}
+    limit_lines = []
+    for key in ["max_connections", "lifetime", "idle_timeout"]:
+        value = str(limit.get(key, "")).strip()
+        if value:
+            limit_lines.append(f"\t\t{key} = {value}")
+    if limit_lines:
+        lines.append("\tlimit {")
+        lines.extend(limit_lines)
+        lines.append("\t}")
+
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def encode_simple_client_id(path: Path, name: str, block_index: int) -> str:
+    raw = f"{path.resolve()}|{name}|{block_index}".encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_simple_client_id(client_id: str) -> dict[str, Any]:
+    padded = client_id + "=" * (-len(client_id) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        raise ValueError("Invalid client id.")
+
+    parts = decoded.split("|", 2)
+    if len(parts) != 3:
+        raise ValueError("Invalid client id.")
+
+    path_raw, name, block_index_raw = parts
+    try:
+        block_index = int(block_index_raw)
+    except ValueError:
+        raise ValueError("Invalid client id.")
+
+    return {
+        "path": Path(path_raw).resolve(),
+        "name": name,
+        "block_index": block_index,
+    }
+
+
+def locate_client_block(blocks: list[dict[str, Any]], decoded_id: dict[str, Any]) -> dict[str, Any] | None:
+    block_index = decoded_id["block_index"]
+    if 0 <= block_index < len(blocks):
+        block = blocks[block_index]
+        if block["name"] == decoded_id["name"]:
+            return block
+
+    for block in blocks:
+        if block["name"] == decoded_id["name"]:
+            return block
+    return None
+
+
+def is_allowed_simple_clients_path(settings: AppSettings, path: Path) -> bool:
+    root = settings.freeradius_config_root.resolve()
+    if not is_under_directory(path.resolve(), root):
+        return False
+    allowed_sources = resolve_simple_clients_config_files(root, root / "clients.conf")
+    return str(path.resolve()) in {str(item.resolve()) for item in allowed_sources}
+
+
+def build_simple_clients_index(settings: AppSettings, include_secrets: bool = False) -> list[dict[str, Any]]:
+    root = settings.freeradius_config_root.resolve()
+    clients_path = (root / "clients.conf").resolve()
+    files = resolve_simple_clients_config_files(root, clients_path)
+
+    entries: list[dict[str, Any]] = []
+    for source_file in files:
+        try:
+            content = source_file.read_text(encoding="utf-8") if source_file.exists() else ""
+        except OSError:
+            continue
+
+        blocks = parse_client_blocks(content)
+        for block in blocks:
+            fields = parse_simple_client_fields(block["body"])
+            entries.append(
+                {
+                    "id": encode_simple_client_id(source_file, block["name"], block["index"]),
+                    "name": block["name"],
+                    "source_path": str(source_file),
+                    "source_file": source_file.name,
+                    "ipaddr": fields.get("ipaddr", ""),
+                    "ipv4addr": fields.get("ipv4addr", ""),
+                    "ipv6addr": fields.get("ipv6addr", ""),
+                    "secret": fields.get("secret", ""),
+                    "nastype": fields.get("nastype", ""),
+                    "shortname": fields.get("shortname", ""),
+                    "proto": fields.get("proto", ""),
+                    "virtual_server": fields.get("virtual_server", ""),
+                    "require_message_authenticator": fields.get("require_message_authenticator", False),
+                    "limit": fields.get("limit", {}),
+                }
+            )
+
+    entries.sort(key=lambda item: (item["name"].lower(), item["source_file"].lower()))
+    return [sanitize_simple_client_entry(item, include_secrets) for item in entries]
+
+
+def find_simple_client_by_id(settings: AppSettings, client_id: str, include_secrets: bool = False) -> dict[str, Any] | None:
+    target_id = client_id.strip()
+    if not target_id:
+        raise ValueError("Client id is required.")
+    clients = build_simple_clients_index(settings, include_secrets=include_secrets)
+    for client in clients:
+        if client["id"] == target_id:
+            return client
+    return None
 
 
 def list_toggle_items(available_dir: Path, enabled_dir: Path, descriptions: dict[str, str]) -> list[dict[str, Any]]:
