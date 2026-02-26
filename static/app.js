@@ -8,6 +8,8 @@ const simpleApplyStatusEl = document.getElementById('simple-apply-status');
 const authSettingsStatusEl = document.getElementById('auth-settings-status');
 const appConfigs = window.APP_CONFIGS || [];
 const ACTIVE_TAB_STORAGE_KEY = 'freeradius-webgui.activeTab';
+const ACTIVE_SECTION_STORAGE_KEY = 'freeradius-webgui.activeSection';
+const CONFIG_MODE_STORAGE_KEY = 'freeradius-webgui.configMode';
 const INTERFACE_SETTINGS_STORAGE_KEY = 'freeradius-webgui.interfaceSettings';
 const SIDEBAR_STATE_STORAGE_KEY = 'freeradius-webgui.sidebarState';
 
@@ -73,6 +75,9 @@ let currentUserPermissions = new Set();
 let showCommentedRadiusdOptions = false;
 let simpleRadiusdViewMode = 'directives';
 let sidebarState = {};
+let activeSection = 'overview';
+let activeConfigMode = 'simple';
+const loadedSectionKeys = new Set();
 
 const simpleClientFieldIds = [
   'simple-client-name',
@@ -800,6 +805,7 @@ async function loadCurrentUserPermissions() {
   const data = await api('/api/auth/me');
   const permissions = Array.isArray(data.permissions) ? data.permissions : [];
   currentUserPermissions = new Set(permissions);
+  applyPermissionVisibility();
 }
 
 async function loadSimplePolicySelection() {
@@ -1232,18 +1238,239 @@ async function deleteTrustedRoot(cert) {
   await refreshTrustedRoots();
 }
 
-function renderTabState(activeTab) {
-  document.querySelectorAll('[data-tab]').forEach((button) => {
-    button.classList.toggle('active', button.dataset.tab === activeTab);
+function hasPermission(permissionName) {
+  return currentUserPermissions.has(permissionName);
+}
+
+function isSectionAllowed(sectionName) {
+  if (sectionName === 'overview') {
+    return hasPermission('view_dashboard') || hasPermission('view_logs') || hasPermission('view_metrics') || hasPermission('service_control');
+  }
+  if (sectionName === 'config') {
+    return hasPermission('simple_config_read') || hasPermission('advanced_config_read');
+  }
+  if (sectionName === 'certs') {
+    return hasPermission('cert_server_manage') || hasPermission('cert_trusted_roots_manage');
+  }
+  if (sectionName === 'settings') {
+    return true;
+  }
+  return false;
+}
+
+function setElementHiddenByPermission(element, permissionName) {
+  if (!element || !permissionName) {
+    return;
+  }
+  element.classList.toggle('hidden', !hasPermission(permissionName));
+}
+
+function applyPermissionVisibility() {
+  document.querySelectorAll('[data-permission]').forEach((element) => {
+    setElementHiddenByPermission(element, element.getAttribute('data-permission'));
   });
+
+  const simpleSectionButtons = document.querySelectorAll('[data-simple-section]');
+  const simpleAllowed = hasPermission('simple_config_read');
+  simpleSectionButtons.forEach((button) => button.classList.toggle('hidden', !simpleAllowed));
+  document.getElementById('simple-new-client').classList.toggle('hidden', !hasPermission('simple_config_apply'));
+  document.getElementById('save-simple-client').classList.toggle('hidden', !hasPermission('simple_config_apply'));
+  document.getElementById('add-simple-policy').classList.toggle('hidden', !hasPermission('simple_config_apply'));
+
+  const certServerAllowed = hasPermission('cert_server_manage');
+  const certTrustedAllowed = hasPermission('cert_trusted_roots_manage');
+  const certServerButton = document.querySelector('[data-cert-section="server"]');
+  const certTrustedButton = document.querySelector('[data-cert-section="trusted"]');
+  if (certServerButton) {
+    certServerButton.classList.toggle('hidden', !certServerAllowed);
+  }
+  if (certTrustedButton) {
+    certTrustedButton.classList.toggle('hidden', !certTrustedAllowed);
+  }
+
+  if (selectedCertSection === 'server' && !certServerAllowed && certTrustedAllowed) {
+    renderCertSection('trusted');
+  } else if (selectedCertSection === 'trusted' && !certTrustedAllowed && certServerAllowed) {
+    renderCertSection('server');
+  }
+
+  document.getElementById('settings-auth-panel').classList.toggle('hidden', !hasPermission('access_control_manage'));
+  document.getElementById('settings-access-panel').classList.toggle('hidden', !hasPermission('access_control_manage'));
+}
+
+function allowedSections() {
+  return ['overview', 'config', 'certs', 'settings'].filter((section) => isSectionAllowed(section));
+}
+
+function renderSectionNavigation() {
+  const allowed = new Set(allowedSections());
+  document.querySelectorAll('[data-section]').forEach((button) => {
+    const section = button.dataset.section;
+    const visible = allowed.has(section);
+    button.classList.toggle('hidden', !visible);
+    button.classList.toggle('active', visible && section === activeSection);
+  });
+}
+
+function renderConfigModeBar() {
+  const configBar = document.getElementById('config-mode-bar');
+  if (!configBar) {
+    return;
+  }
+  const canSimple = hasPermission('simple_config_read');
+  const canAdvanced = hasPermission('advanced_config_read');
+  const canUseConfig = canSimple || canAdvanced;
+  if (activeConfigMode === 'simple' && !canSimple && canAdvanced) {
+    activeConfigMode = 'advanced';
+  }
+  if (activeConfigMode === 'advanced' && !canAdvanced && canSimple) {
+    activeConfigMode = 'simple';
+  }
+
+  const isConfigVisible = activeSection === 'config' && canUseConfig;
+  configBar.classList.toggle('hidden', !isConfigVisible);
+  const simpleButton = document.getElementById('config-mode-simple');
+  const advancedButton = document.getElementById('config-mode-advanced');
+  simpleButton.classList.toggle('active', activeConfigMode === 'simple');
+  advancedButton.classList.toggle('active', activeConfigMode === 'advanced');
+  simpleButton.classList.toggle('hidden', !canSimple);
+  advancedButton.classList.toggle('hidden', !canAdvanced);
+}
+
+function renderSectionPanels() {
   document.querySelectorAll('[data-tab-panel]').forEach((panel) => {
-    panel.classList.toggle('hidden', panel.dataset.tabPanel !== activeTab);
+    const panelName = panel.dataset.tabPanel;
+    if (activeSection === 'config') {
+      const shouldShow = (activeConfigMode === 'simple' && panelName === 'simple-config')
+        || (activeConfigMode === 'advanced' && panelName === 'config');
+      panel.classList.toggle('hidden', !shouldShow);
+      return;
+    }
+    panel.classList.toggle('hidden', panelName !== activeSection);
   });
+}
+
+function persistNavigationState() {
   try {
-    localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, activeTab);
+    localStorage.setItem(ACTIVE_SECTION_STORAGE_KEY, activeSection);
+    localStorage.setItem(CONFIG_MODE_STORAGE_KEY, activeConfigMode);
   } catch {
     // Ignore browser storage failures.
   }
+}
+
+function renderSectionState(sectionName) {
+  activeSection = sectionName;
+  renderSectionNavigation();
+  renderConfigModeBar();
+  renderSectionPanels();
+  persistNavigationState();
+}
+
+function getInitialSection() {
+  const allowed = allowedSections();
+  if (!allowed.length) {
+    return 'overview';
+  }
+
+  try {
+    const legacyTab = localStorage.getItem(ACTIVE_TAB_STORAGE_KEY) || '';
+    const stored = localStorage.getItem(ACTIVE_SECTION_STORAGE_KEY) || legacyTab || 'overview';
+    if (stored === 'simple-config') {
+      return allowed.includes('config') ? 'config' : allowed[0];
+    }
+    return allowed.includes(stored) ? stored : allowed[0];
+  } catch {
+    return allowed[0];
+  }
+}
+
+function getInitialConfigMode() {
+  const canSimple = hasPermission('simple_config_read');
+  const canAdvanced = hasPermission('advanced_config_read');
+  if (canAdvanced && !canSimple) {
+    return 'advanced';
+  }
+  if (canSimple && !canAdvanced) {
+    return 'simple';
+  }
+  try {
+    const stored = localStorage.getItem(CONFIG_MODE_STORAGE_KEY);
+    if (stored === 'advanced' && canAdvanced) {
+      return 'advanced';
+    }
+    return 'simple';
+  } catch {
+    return 'simple';
+  }
+}
+
+async function ensureSectionLoaded(sectionName, forceReload = false) {
+  const loadOverview = async () => {
+    await refreshStatus();
+    if (hasPermission('view_logs')) {
+      await refreshLogs();
+    }
+    if (hasPermission('view_metrics')) {
+      await refreshMetrics();
+    }
+  };
+
+  const loadConfigSimple = async () => {
+    if (hasPermission('simple_config_read')) {
+      await loadSimpleConfig();
+      await loadSimpleSections();
+    }
+  };
+
+  const loadConfigAdvanced = async () => {
+    renderCategories();
+    renderFiles();
+    if (hasPermission('advanced_config_read') && appConfigs.length > 0 && selectedConfigKey) {
+      await loadConfig();
+    }
+  };
+
+  const loadCerts = async () => {
+    if (hasPermission('cert_server_manage')) {
+      await refreshServerCertDetails();
+    }
+    if (hasPermission('cert_trusted_roots_manage')) {
+      await refreshTrustedRoots();
+    }
+  };
+
+  const loadSettings = async () => {
+    if (hasPermission('access_control_manage')) {
+      await refreshRbacData();
+      await loadAuthSettings();
+    }
+  };
+
+  let loadKey = sectionName;
+  if (sectionName === 'config') {
+    loadKey = `config:${activeConfigMode}`;
+  }
+
+  if (!forceReload && loadedSectionKeys.has(loadKey)) {
+    return;
+  }
+
+  if (sectionName === 'overview') {
+    await loadOverview();
+  } else if (sectionName === 'config') {
+    if (activeConfigMode === 'advanced') {
+      await loadConfigAdvanced();
+    } else {
+      await loadConfigSimple();
+    }
+  } else if (sectionName === 'certs') {
+    await loadCerts();
+  } else if (sectionName === 'settings') {
+    await loadSettings();
+  }
+
+  loadedSectionKeys.add(loadKey);
 }
 
 function loadSidebarState() {
@@ -1547,16 +1774,6 @@ async function refreshRbacData() {
   renderGroupAssignments(groupsData.assignments || []);
 }
 
-function getInitialTab() {
-  const validTabs = new Set(Array.from(document.querySelectorAll('[data-tab]')).map((item) => item.dataset.tab));
-  try {
-    const stored = localStorage.getItem(ACTIVE_TAB_STORAGE_KEY) || 'overview';
-    return validTabs.has(stored) ? stored : 'overview';
-  } catch {
-    return 'overview';
-  }
-}
-
 function renderCategories() {
   const container = document.getElementById('config-categories');
   container.innerHTML = '';
@@ -1616,9 +1833,18 @@ function renderFiles() {
   });
 }
 
-document.querySelectorAll('[data-tab]').forEach((button) => {
-  button.addEventListener('click', () => {
-    renderTabState(button.dataset.tab);
+document.querySelectorAll('[data-section]').forEach((button) => {
+  button.addEventListener('click', async () => {
+    const targetSection = button.dataset.section;
+    if (!targetSection || !isSectionAllowed(targetSection)) {
+      return;
+    }
+    renderSectionState(targetSection);
+    try {
+      await ensureSectionLoaded(targetSection);
+    } catch (error) {
+      setMessage(error.message, true);
+    }
   });
 });
 
@@ -1755,6 +1981,38 @@ document.getElementById('simple-radiusd-view-directives').addEventListener('clic
 document.getElementById('simple-radiusd-view-structure').addEventListener('click', () => {
   simpleRadiusdViewMode = 'structure';
   renderSimpleRadiusdFromState();
+});
+
+document.getElementById('config-mode-simple').addEventListener('click', async () => {
+  if (!hasPermission('simple_config_read')) {
+    return;
+  }
+  if (activeConfigMode === 'simple') {
+    return;
+  }
+  activeConfigMode = 'simple';
+  renderSectionState('config');
+  try {
+    await ensureSectionLoaded('config');
+  } catch (error) {
+    setMessage(error.message, true);
+  }
+});
+
+document.getElementById('config-mode-advanced').addEventListener('click', async () => {
+  if (!hasPermission('advanced_config_read')) {
+    return;
+  }
+  if (activeConfigMode === 'advanced') {
+    return;
+  }
+  activeConfigMode = 'advanced';
+  renderSectionState('config');
+  try {
+    await ensureSectionLoaded('config');
+  } catch (error) {
+    setMessage(error.message, true);
+  }
 });
 
 document.getElementById('save-simple-client').addEventListener('click', async () => {
@@ -1992,27 +2250,13 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
   try {
     initializeCollapsibleSidebars();
     applyInterfaceSettings(getInterfaceSettings());
-    renderTabState(getInitialTab());
+    await loadCurrentUserPermissions();
+    activeConfigMode = getInitialConfigMode();
+    const initialSection = getInitialSection();
+    renderSectionState(initialSection);
     renderCertSection(selectedCertSection);
     renderSimpleSection(selectedSimpleSection);
-    renderCategories();
-    renderFiles();
-
-    await refreshStatus();
-    await loadCurrentUserPermissions();
-    if (appConfigs.length > 0 && selectedConfigKey) {
-      await loadConfig();
-    } else {
-      setMessage('No editable configuration files available. Update EDITABLE_CONFIGS or enable auto-discovery.', true);
-    }
-    await refreshLogs();
-    await refreshMetrics();
-    await loadSimpleConfig();
-    await loadSimpleSections();
-    await refreshServerCertDetails();
-    await refreshTrustedRoots();
-    await refreshRbacData();
-    await loadAuthSettings();
+    await ensureSectionLoaded(initialSection);
   } catch (error) {
     setMessage(error.message, true);
   }

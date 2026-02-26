@@ -13,22 +13,31 @@
       <button id="logout-btn">Logout</button>
     </header>
 
-    <nav class="tabs row gap" aria-label="Main sections">
-      <button class="tab-btn active" data-tab="overview">Overview</button>
-      <button class="tab-btn" data-tab="simple-config">Simple Config</button>
-      <button class="tab-btn" data-tab="config">Advanced Config</button>
-      <button class="tab-btn" data-tab="certs">Certificates</button>
-      <button class="tab-btn" data-tab="settings">Interface Settings</button>
-    </nav>
+    <section class="workspace-layout">
+      <aside class="global-sidebar panel">
+        <h3>Navigation</h3>
+        <div class="stack gap">
+          <button class="tab-btn active" data-section="overview">Dashboard</button>
+          <button class="tab-btn" data-section="config">Config</button>
+          <button class="tab-btn" data-section="certs">Certificates</button>
+          <button class="tab-btn" data-section="settings">Settings</button>
+        </div>
+      </aside>
+
+      <div class="workspace-main">
+        <div id="config-mode-bar" class="row gap hidden">
+          <button id="config-mode-simple" type="button" class="tab-btn active">Simple</button>
+          <button id="config-mode-advanced" type="button" class="tab-btn">Advanced</button>
+        </div>
 
     <section class="tab-panel" data-tab-panel="overview">
       <section class="panel">
         <h2>Service</h2>
         <div class="row gap">
           <p>Status: <strong id="service-status">Loading...</strong></p>
-          <button data-service-action="start">Start</button>
-          <button data-service-action="stop">Stop</button>
-          <button data-service-action="restart">Restart</button>
+          <button data-service-action="start" data-permission="service_control">Start</button>
+          <button data-service-action="stop" data-permission="service_control">Stop</button>
+          <button data-service-action="restart" data-permission="service_control">Restart</button>
         </div>
       </section>
 
@@ -36,14 +45,14 @@
         <div>
           <h2>Logs</h2>
           <div class="row gap">
-            <button id="refresh-logs">Refresh</button>
+            <button id="refresh-logs" data-permission="view_logs">Refresh</button>
           </div>
           <pre id="logs"></pre>
         </div>
         <div>
           <h2>Auth Summary</h2>
           <div class="row gap">
-            <button id="refresh-metrics">Refresh</button>
+            <button id="refresh-metrics" data-permission="view_metrics">Refresh</button>
           </div>
           <p>Success: <strong id="metric-success">0</strong></p>
           <p>Failure: <strong id="metric-failure">0</strong></p>
@@ -71,9 +80,9 @@
         <div class="config-main">
           <h2 id="config-title">Configuration</h2>
           <div class="row gap">
-            <button id="load-config">Reload</button>
-            <button id="save-config">Save + Validate + Restart</button>
-            <button id="rollback-config">Rollback (latest)</button>
+            <button id="load-config" data-permission="advanced_config_read">Reload</button>
+            <button id="save-config" data-permission="advanced_config_write">Save + Validate + Restart</button>
+            <button id="rollback-config" data-permission="advanced_config_rollback">Rollback (latest)</button>
           </div>
           <textarea id="config-content" rows="16" spellcheck="false"></textarea>
           <p id="config-meta" class="muted"></p>
@@ -85,20 +94,20 @@
       <section class="panel simple-layout">
         <aside class="simple-sidebar" data-collapsible-sidebar="simple-main-menu">
           <div class="row between gap">
-            <h3>Simple Areas</h3>
+            <h3>Simplified Config</h3>
             <button type="button" class="sidebar-collapse-btn" data-toggle-sidebar="simple-main-menu">Collapse</button>
           </div>
           <div class="stack gap">
-            <button class="sidebar-btn active" data-simple-section="radiusd">radiusd</button>
-            <button class="sidebar-btn" data-simple-section="clients">clients</button>
+            <button class="sidebar-btn active" data-simple-section="radiusd">Radiusd</button>
+            <button class="sidebar-btn" data-simple-section="clients">Clients</button>
             <button class="sidebar-btn" data-simple-section="mods">Modules (mods)</button>
             <button class="sidebar-btn" data-simple-section="sites">Virtual Servers (sites)</button>
-            <button class="sidebar-btn" data-simple-section="policy">policy</button>
+            <button class="sidebar-btn" data-simple-section="policy">Policy</button>
           </div>
           <div class="row gap simple-actions">
-            <button id="load-simple-sections">Reload sections</button>
-            <button id="load-simple-config">Reload toggles</button>
-            <button id="apply-simple-config">Validate, Apply + Restart</button>
+            <button id="load-simple-sections" data-permission="simple_config_read">Reload sections</button>
+            <button id="load-simple-config" data-permission="simple_config_read">Reload toggles</button>
+            <button id="apply-simple-config" data-permission="simple_config_apply">Validate, Apply + Restart</button>
           </div>
           <p id="simple-apply-status" class="muted"></p>
         </aside>
@@ -141,7 +150,7 @@
 
                   <p id="simple-radiusd-status" class="muted"></p>
                   <div class="row gap">
-                    <button id="save-simple-radiusd-option" type="button">Save option</button>
+                    <button id="save-simple-radiusd-option" type="button" data-permission="simple_config_apply">Save option</button>
                   </div>
                 </div>
               </div>
@@ -220,9 +229,9 @@
                   <p id="simple-client-meta" class="muted"></p>
                   <p id="simple-client-status" class="muted"></p>
                   <div class="row gap">
-                    <button id="save-simple-client" type="button">Save client</button>
-                    <button id="add-simple-client" type="button">Add client</button>
-                    <button id="delete-simple-client" type="button" class="danger-btn">Delete client</button>
+                    <button id="save-simple-client" type="button" data-permission="simple_config_apply">Save client</button>
+                    <button id="add-simple-client" type="button" data-permission="simple_config_apply">Add client</button>
+                    <button id="delete-simple-client" type="button" class="danger-btn" data-permission="simple_config_apply">Delete client</button>
                   </div>
                 </div>
               </div>
@@ -255,7 +264,7 @@
               <h3>Add new policy file</h3>
               <input id="simple-add-policy-filename" placeholder="filename (e.g. custom-policy.conf)">
               <textarea id="simple-add-policy-content" rows="8" spellcheck="false" placeholder="Enter policy file content"></textarea>
-              <button id="add-simple-policy">Add new policy</button>
+              <button id="add-simple-policy" data-permission="simple_config_apply">Add new policy</button>
             </div>
           </section>
         </div>
@@ -283,8 +292,8 @@
             <p class="muted">Updates the configured FreeRADIUS server cert file and restarts after validation.</p>
             <textarea id="server-cert-content" rows="10" spellcheck="false" placeholder="Paste server.pem content"></textarea>
             <div class="row gap">
-              <button id="update-server-cert">Update server cert</button>
-              <button id="refresh-server-cert-details">Refresh details</button>
+              <button id="update-server-cert" data-permission="cert_server_manage">Update server cert</button>
+              <button id="refresh-server-cert-details" data-permission="cert_server_manage">Refresh details</button>
             </div>
             <p id="server-cert-meta" class="muted"></p>
             <pre id="server-cert-details" class="cert-details muted">Loading server certificate details...</pre>
@@ -293,7 +302,7 @@
               <h3>Upload certificate file</h3>
               <p class="muted">Supported formats: .pem, .crt, .cer, .der, .p7b (converted to PEM).</p>
               <input id="server-cert-file" type="file" accept=".pem,.crt,.cer,.der,.p7b,.p7c">
-              <button id="upload-server-cert">Upload and apply</button>
+              <button id="upload-server-cert" data-permission="cert_server_manage">Upload and apply</button>
             </div>
 
             <div class="panel inset-panel">
@@ -307,7 +316,7 @@
               <input id="csr-locality" placeholder="Locality (optional)">
               <input id="csr-email" placeholder="Email (optional)">
               <input id="csr-san" placeholder="SANs comma-separated (optional, e.g. radius.example.com,DNS:radius.local)">
-              <button id="generate-server-csr">Generate CSR</button>
+              <button id="generate-server-csr" data-permission="cert_server_manage">Generate CSR</button>
               <pre id="server-csr-output" class="cert-details muted">Generated CSR will appear here.</pre>
             </div>
           </section>
@@ -317,11 +326,11 @@
             <p class="muted">Installs a new trusted root on host and updates the trust store.</p>
             <input id="root-cert-filename" placeholder="example.crt">
             <textarea id="root-cert-content" rows="8" spellcheck="false" placeholder="Paste root certificate"></textarea>
-            <button id="add-root-cert">Add trusted root</button>
+            <button id="add-root-cert" data-permission="cert_trusted_roots_manage">Add trusted root</button>
 
             <div class="row between gap">
               <h3>Installed trusted roots</h3>
-              <button id="refresh-trusted-roots">Refresh list</button>
+              <button id="refresh-trusted-roots" data-permission="cert_trusted_roots_manage">Refresh list</button>
             </div>
             <p id="trusted-root-meta" class="muted"></p>
             <ul id="trusted-root-list" class="cert-list"></ul>
@@ -333,7 +342,7 @@
     </section>
 
     <section class="tab-panel hidden" data-tab-panel="settings">
-      <section class="panel">
+      <section class="panel" id="settings-interface-panel">
         <h2>Interface Settings</h2>
         <p class="muted">Customize screen usage and color style for this browser.</p>
 
@@ -355,7 +364,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="settings-auth-panel">
         <h2>Authentication Settings</h2>
         <p class="muted">Configure optional Microsoft Entra ID login for this Web GUI.</p>
 
@@ -399,7 +408,7 @@
         <p id="auth-settings-status" class="muted"></p>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="settings-access-panel">
         <h2>Access Control</h2>
         <p class="muted">Manage custom roles and role assignments for Web GUI access.</p>
         <div class="row gap">
@@ -438,6 +447,9 @@
           <ul id="rbac-group-assignments" class="cert-list"></ul>
         </div>
       </section>
+    </section>
+
+      </div>
     </section>
 
     <p id="message" class="muted"></p>

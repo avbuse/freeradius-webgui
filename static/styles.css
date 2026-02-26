@@ -109,6 +109,31 @@ body {
   margin-top: 0.5rem;
 }
 
+.workspace-layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+.global-sidebar {
+  position: sticky;
+  top: 1rem;
+}
+
+.global-sidebar .tab-btn {
+  width: 100%;
+  text-align: left;
+}
+
+.workspace-main {
+  min-width: 0;
+}
+
+#config-mode-bar {
+  margin-top: 0.75rem;
+}
+
 .tab-btn {
   background: var(--color-sidebar-bg);
   color: var(--color-text);
@@ -120,7 +145,7 @@ body {
 }
 
 .hidden {
-  display: none;
+  display: none !important;
 }
 
 .row {
@@ -485,6 +510,14 @@ pre {
 }
 
 @media (max-width: 900px) {
+  .workspace-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .global-sidebar {
+    position: static;
+  }
+
   .two-col {
     grid-template-columns: 1fr;
   }
