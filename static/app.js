@@ -7,6 +7,20 @@ const serverCsrOutputEl = document.getElementById('server-csr-output');
 const simpleApplyStatusEl = document.getElementById('simple-apply-status');
 const authSettingsStatusEl = document.getElementById('auth-settings-status');
 const appConfigs = window.APP_CONFIGS || [];
+const isBetaMode = Boolean(window.APP_BETA_MODE);
+const betaSimpleSectionAllowlist = new Set(['radiusd', 'clients', 'mods', 'sites']);
+const betaRadiusdKeyAllowlist = new Set([
+  'max_request_time',
+  'cleanup_delay',
+  'max_requests',
+  'hostname_lookups',
+  'log.destination',
+  'log.file',
+  'log.timestamp',
+  'security.max_attributes',
+  'thread_pool.num_workers',
+]);
+const shouldRestartOnSimpleEdit = !isBetaMode;
 const ACTIVE_TAB_STORAGE_KEY = 'freeradius-webgui.activeTab';
 const ACTIVE_SECTION_STORAGE_KEY = 'freeradius-webgui.activeSection';
 const CONFIG_MODE_STORAGE_KEY = 'freeradius-webgui.configMode';
@@ -71,12 +85,16 @@ let selectedSimpleSection = 'radiusd';
 let simpleSectionsData = { radiusd: {}, clients: { items: [], sources: [] }, policy: { files: [] } };
 let selectedSimpleClientId = '';
 let selectedSimpleRadiusdOptionKey = '';
+let selectedSimpleModName = '';
+let selectedSimpleSiteName = '';
 let currentUserPermissions = new Set();
 let showCommentedRadiusdOptions = false;
 let simpleRadiusdViewMode = 'directives';
+let trustedRootSourceFilter = 'all';
 let sidebarState = {};
 let activeSection = 'overview';
 let activeConfigMode = 'simple';
+let pendingSimpleChanges = [];
 const loadedSectionKeys = new Set();
 
 const simpleClientFieldIds = [
@@ -115,6 +133,60 @@ const setSimpleApplyStatus = (text, mode = 'muted') => {
   simpleApplyStatusEl.className = mode;
 };
 
+function renderPendingSimpleChanges() {
+  const panel = document.getElementById('simple-pending-panel');
+  const countEl = document.getElementById('simple-pending-count');
+  const listEl = document.getElementById('simple-pending-list');
+  const clearButton = document.getElementById('clear-simple-pending');
+  if (!panel || !countEl || !listEl || !clearButton) {
+    return;
+  }
+
+  panel.classList.toggle('hidden', !isBetaMode);
+  if (!isBetaMode) {
+    return;
+  }
+
+  listEl.innerHTML = '';
+  if (!pendingSimpleChanges.length) {
+    countEl.textContent = 'No pending edits';
+    clearButton.disabled = true;
+    return;
+  }
+
+  countEl.textContent = `${pendingSimpleChanges.length} pending edit${pendingSimpleChanges.length === 1 ? '' : 's'}`;
+  clearButton.disabled = false;
+  pendingSimpleChanges.forEach((item) => {
+    const li = document.createElement('li');
+    li.textContent = item;
+    listEl.appendChild(li);
+  });
+}
+
+function addPendingSimpleChange(text) {
+  if (!isBetaMode) {
+    return;
+  }
+  const normalized = String(text || '').trim();
+  if (!normalized) {
+    return;
+  }
+  const previous = pendingSimpleChanges[pendingSimpleChanges.length - 1];
+  if (previous === normalized) {
+    return;
+  }
+  pendingSimpleChanges.push(normalized);
+  if (pendingSimpleChanges.length > 20) {
+    pendingSimpleChanges = pendingSimpleChanges.slice(-20);
+  }
+  renderPendingSimpleChanges();
+}
+
+function clearPendingSimpleChanges() {
+  pendingSimpleChanges = [];
+  renderPendingSimpleChanges();
+}
+
 const setAuthSettingsStatus = (text, mode = 'muted') => {
   if (!authSettingsStatusEl) {
     return;
@@ -140,6 +212,36 @@ const setSimpleRadiusdStatus = (text, mode = 'muted') => {
   statusEl.textContent = text;
   statusEl.className = mode;
 };
+
+const setSimpleModStatus = (text, mode = 'muted') => {
+  const statusEl = document.getElementById('simple-mod-status');
+  if (!statusEl) {
+    return;
+  }
+  statusEl.textContent = text;
+  statusEl.className = mode;
+};
+
+const setSimpleSiteStatus = (text, mode = 'muted') => {
+  const statusEl = document.getElementById('simple-site-status');
+  if (!statusEl) {
+    return;
+  }
+  statusEl.textContent = text;
+  statusEl.className = mode;
+};
+
+function formatApiError(error, includeDetails = true) {
+  const message = String(error?.message || 'Request failed').trim();
+  const details = typeof error?.details === 'string' ? error.details.trim() : '';
+  if (!includeDetails || !details) {
+    return message;
+  }
+
+  const maxLen = 700;
+  const shortened = details.length > maxLen ? `${details.slice(0, maxLen)}...` : details;
+  return `${message} Details: ${shortened}`;
+}
 
 function canViewSimpleClientSecrets() {
   return currentUserPermissions.has('client_secret_view');
@@ -263,12 +365,17 @@ async function api(path, options = {}) {
   }
 
   if (response.status === 401) {
-    window.location.href = '/login';
+    const nextPath = encodeURIComponent(window.location.pathname || '/');
+    window.location.href = `/login?next=${nextPath}`;
     throw new Error('Unauthorized');
   }
 
   if (!response.ok || data.ok === false) {
-    throw new Error(data.error || 'Request failed');
+    const error = new Error(data.error || 'Request failed');
+    if (typeof data.details === 'string' && data.details.trim()) {
+      error.details = data.details;
+    }
+    throw error;
   }
 
   return data;
@@ -349,7 +456,7 @@ async function refreshMetrics() {
   document.getElementById('bar-failure').style.width = `${failurePct}%`;
 }
 
-function renderSimpleOptionGroup(containerId, entries, prefix) {
+function renderSimpleOptionGroup(containerId, entries, prefix, selectedName, onSelect) {
   const container = document.getElementById(containerId);
   if (!container) {
     return;
@@ -365,7 +472,7 @@ function renderSimpleOptionGroup(containerId, entries, prefix) {
   }
 
   entries.forEach((entry) => {
-    const row = document.createElement('label');
+    const row = document.createElement('div');
     row.className = 'simple-option-row';
 
     const checkbox = document.createElement('input');
@@ -389,16 +496,71 @@ function renderSimpleOptionGroup(containerId, entries, prefix) {
       textWrap.appendChild(desc);
     }
 
+    const editButton = document.createElement('button');
+    editButton.type = 'button';
+    editButton.textContent = entry.name === selectedName ? 'Editing' : 'Edit';
+    editButton.disabled = entry.name === selectedName;
+    editButton.addEventListener('click', () => {
+      if (typeof onSelect === 'function') {
+        onSelect(entry.name);
+      }
+    });
+
     row.appendChild(checkbox);
     row.appendChild(textWrap);
+    row.appendChild(editButton);
     container.appendChild(row);
   });
 }
 
 function renderSimpleConfig(snapshot) {
   simpleConfigSnapshot = snapshot;
-  renderSimpleOptionGroup('simple-mods', snapshot.mods || [], 'simple-mod');
-  renderSimpleOptionGroup('simple-sites', snapshot.sites || [], 'simple-site');
+  const mods = snapshot.mods || [];
+  const sites = snapshot.sites || [];
+
+  if (!selectedSimpleModName || !mods.some((entry) => entry.name === selectedSimpleModName)) {
+    selectedSimpleModName = mods[0]?.name || '';
+  }
+  if (!selectedSimpleSiteName || !sites.some((entry) => entry.name === selectedSimpleSiteName)) {
+    selectedSimpleSiteName = sites[0]?.name || '';
+  }
+
+  const renderModOptions = () => {
+    renderSimpleOptionGroup('simple-mods', mods, 'simple-mod', selectedSimpleModName, (name) => {
+      selectedSimpleModName = name;
+      renderModOptions();
+      loadSimpleToggleEditor('mods', name).catch((error) => {
+        setSimpleModStatus(`Failed to load module '${name}': ${error.message}`, 'error');
+        setMessage(error.message, true);
+      });
+    });
+  };
+
+  const renderSiteOptions = () => {
+    renderSimpleOptionGroup('simple-sites', sites, 'simple-site', selectedSimpleSiteName, (name) => {
+      selectedSimpleSiteName = name;
+      renderSiteOptions();
+      loadSimpleToggleEditor('sites', name).catch((error) => {
+        setSimpleSiteStatus(`Failed to load site '${name}': ${error.message}`, 'error');
+        setMessage(error.message, true);
+      });
+    });
+  };
+
+  renderModOptions();
+  renderSiteOptions();
+
+  if (selectedSimpleModName) {
+    loadSimpleToggleEditor('mods', selectedSimpleModName).catch((error) => setMessage(error.message, true));
+  } else {
+    clearSimpleToggleEditor('mods');
+  }
+
+  if (selectedSimpleSiteName) {
+    loadSimpleToggleEditor('sites', selectedSimpleSiteName).catch((error) => setMessage(error.message, true));
+  } else {
+    clearSimpleToggleEditor('sites');
+  }
 }
 
 async function loadSimpleConfig() {
@@ -467,12 +629,21 @@ function renderSimpleSectionsData(data) {
 function getSimpleRadiusdCollections() {
   const radiusd = simpleSectionsData.radiusd || {};
   const all = radiusd.items || [];
-  const directives = radiusd.directive_items || all.filter((item) => item.editable !== false);
+  const sourceDirectives = radiusd.directive_items || all.filter((item) => item.editable !== false);
+  const directives = isBetaMode
+    ? sourceDirectives.filter((item) => betaRadiusdKeyAllowlist.has(item.key))
+    : sourceDirectives;
   const structure = radiusd.structure_items || all.filter((item) => item.editable === false);
-  return { directives, structure, all };
+  const filteredAll = isBetaMode
+    ? all.filter((item) => item.editable === false || betaRadiusdKeyAllowlist.has(item.key))
+    : all;
+  return { directives, structure, all: filteredAll };
 }
 
 function getVisibleSimpleRadiusdItems(items) {
+  if (isBetaMode) {
+    return items;
+  }
   if (simpleRadiusdViewMode === 'structure') {
     return items;
   }
@@ -486,6 +657,18 @@ function renderSimpleRadiusdViewMode() {
   const directivesBtn = document.getElementById('simple-radiusd-view-directives');
   const structureBtn = document.getElementById('simple-radiusd-view-structure');
   const commentedWrap = document.getElementById('simple-radiusd-commented-wrap');
+
+  if (isBetaMode) {
+    simpleRadiusdViewMode = 'directives';
+    directivesBtn.classList.add('active');
+    if (structureBtn) {
+      structureBtn.classList.add('hidden');
+    }
+    if (commentedWrap) {
+      commentedWrap.classList.add('hidden');
+    }
+    return;
+  }
 
   directivesBtn.classList.toggle('active', simpleRadiusdViewMode === 'directives');
   structureBtn.classList.toggle('active', simpleRadiusdViewMode === 'structure');
@@ -588,6 +771,7 @@ async function toggleSimpleRadiusdOptionState(option, shouldBeActive) {
       key: option.key,
       active: shouldBeActive,
       value,
+      restart_after: shouldRestartOnSimpleEdit,
     }),
   });
 
@@ -595,8 +779,14 @@ async function toggleSimpleRadiusdOptionState(option, shouldBeActive) {
     `${data.key} is now ${data.active ? 'active' : 'commented/default'}.`,
     'success',
   );
-  setMessage(`Updated state for radiusd option '${data.key}'.`);
-  await refreshStatus();
+  if (isBetaMode) {
+    setMessage(`Saved state for '${data.key}'. Click "Validate, Apply + Restart" to apply all beta edits.`, false);
+    setSimpleApplyStatus('Pending edits saved. Run Validate, Apply + Restart when ready.', 'warning');
+    addPendingSimpleChange(`radiusd: ${data.key} set ${data.active ? 'active' : 'commented/default'}`);
+  } else {
+    setMessage(`Updated state for radiusd option '${data.key}'.`);
+    await refreshStatus();
+  }
   await loadSimpleSections();
 }
 
@@ -706,12 +896,18 @@ async function saveSimpleRadiusdOption() {
 
   const data = await api('/api/simple-config/radiusd/option', {
     method: 'POST',
-    body: JSON.stringify({ key: optionKey, value }),
+    body: JSON.stringify({ key: optionKey, value, restart_after: shouldRestartOnSimpleEdit }),
   });
 
   setSimpleRadiusdStatus(`Saved ${data.key}.`, 'success');
-  setMessage(`Saved radiusd option '${data.key}'.`);
-  await refreshStatus();
+  if (isBetaMode) {
+    setMessage(`Saved radiusd option '${data.key}'. Click "Validate, Apply + Restart" to apply all beta edits.`, false);
+    setSimpleApplyStatus('Pending edits saved. Run Validate, Apply + Restart when ready.', 'warning');
+    addPendingSimpleChange(`radiusd: ${data.key} value updated`);
+  } else {
+    setMessage(`Saved radiusd option '${data.key}'.`);
+    await refreshStatus();
+  }
   await loadSimpleSections();
 }
 
@@ -828,6 +1024,82 @@ function collectSimpleSelections(containerId) {
   return selections;
 }
 
+function clearSimpleToggleEditor(group) {
+  const isMod = group === 'mods';
+  document.getElementById(isMod ? 'simple-mod-form-title' : 'simple-site-form-title').textContent = isMod
+    ? 'Select a module'
+    : 'Select a site';
+  document.getElementById(isMod ? 'simple-mod-path' : 'simple-site-path').textContent = '';
+  document.getElementById(isMod ? 'simple-mod-content' : 'simple-site-content').value = '';
+  if (isMod) {
+    setSimpleModStatus('');
+  } else {
+    setSimpleSiteStatus('');
+  }
+}
+
+function populateSimpleToggleEditor(group, data) {
+  const isMod = group === 'mods';
+  document.getElementById(isMod ? 'simple-mod-form-title' : 'simple-site-form-title').textContent = isMod
+    ? `Module: ${data.name}`
+    : `Site: ${data.name}`;
+  document.getElementById(isMod ? 'simple-mod-path' : 'simple-site-path').textContent = data.path || '';
+  document.getElementById(isMod ? 'simple-mod-content' : 'simple-site-content').value = data.content || '';
+
+  if (isMod) {
+    setSimpleModStatus(data.has_draft ? 'Loaded saved draft.' : 'Loaded from available file.', 'muted');
+  } else {
+    setSimpleSiteStatus(data.has_draft ? 'Loaded saved draft.' : 'Loaded from available file.', 'muted');
+  }
+}
+
+async function loadSimpleToggleEditor(group, name) {
+  const normalizedGroup = group === 'mods' ? 'mods' : 'sites';
+  const normalizedName = String(name || '').trim();
+  if (!normalizedName) {
+    clearSimpleToggleEditor(normalizedGroup);
+    return;
+  }
+
+  if (normalizedGroup === 'mods') {
+    setSimpleModStatus(`Loading module '${normalizedName}'...`, 'muted');
+  } else {
+    setSimpleSiteStatus(`Loading site '${normalizedName}'...`, 'muted');
+  }
+
+  const data = await api(`/api/simple-config/${normalizedGroup}/${encodeURIComponent(normalizedName)}`);
+  populateSimpleToggleEditor(normalizedGroup, data);
+}
+
+async function saveSimpleToggleDraft(group) {
+  const isMod = group === 'mods';
+  const normalizedGroup = isMod ? 'mods' : 'sites';
+  const selectedName = isMod ? selectedSimpleModName : selectedSimpleSiteName;
+  if (!selectedName) {
+    throw new Error(`Select a ${isMod ? 'module' : 'site'} first.`);
+  }
+
+  const content = document.getElementById(isMod ? 'simple-mod-content' : 'simple-site-content').value;
+  await api(`/api/simple-config/${normalizedGroup}/${encodeURIComponent(selectedName)}/draft`, {
+    method: 'POST',
+    body: JSON.stringify({ content }),
+  });
+
+  if (isMod) {
+    setSimpleModStatus(`Saved draft for '${selectedName}'.`, 'success');
+  } else {
+    setSimpleSiteStatus(`Saved draft for '${selectedName}'.`, 'success');
+  }
+
+  if (isBetaMode) {
+    setMessage(`Saved ${isMod ? 'module' : 'site'} draft '${selectedName}'. Click "Validate, Apply + Restart" to apply all beta edits.`, false);
+    setSimpleApplyStatus('Pending edits saved. Run Validate, Apply + Restart when ready.', 'warning');
+    addPendingSimpleChange(`${normalizedGroup}: updated ${selectedName}`);
+  } else {
+    setMessage(`Saved ${isMod ? 'module' : 'site'} draft '${selectedName}'.`);
+  }
+}
+
 async function applySimpleConfig() {
   const mods = collectSimpleSelections('simple-mods');
   const sites = collectSimpleSelections('simple-sites');
@@ -842,6 +1114,10 @@ async function applySimpleConfig() {
   } else {
     setMessage('No simple config changes were needed.');
   }
+  if (isBetaMode) {
+    clearPendingSimpleChanges();
+    setSimpleApplyStatus('Validate, apply, and restart completed. Pending edits cleared.', 'success');
+  }
   await refreshStatus();
   await loadSimpleConfig();
 }
@@ -854,12 +1130,18 @@ async function addSimpleClient() {
 
   const data = await api('/api/simple-config/clients/add', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, restart_after: shouldRestartOnSimpleEdit }),
   });
 
   setSimpleClientStatus(`Added new client '${data.client}'.`, 'success');
-  setMessage(`Added new client '${data.client}'.`);
-  await refreshStatus();
+  if (isBetaMode) {
+    setMessage(`Added client '${data.client}'. Click "Validate, Apply + Restart" to apply all beta edits.`, false);
+    setSimpleApplyStatus('Pending edits saved. Run Validate, Apply + Restart when ready.', 'warning');
+    addPendingSimpleChange(`client: added ${data.client}`);
+  } else {
+    setMessage(`Added new client '${data.client}'.`);
+    await refreshStatus();
+  }
   await loadSimpleSections();
 }
 
@@ -878,12 +1160,18 @@ async function updateSimpleClient() {
 
   const data = await api('/api/simple-config/clients/update', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, restart_after: shouldRestartOnSimpleEdit }),
   });
 
   setSimpleClientStatus(`Updated client '${data.client}'.`, 'success');
-  setMessage(`Updated client '${data.client}'.`);
-  await refreshStatus();
+  if (isBetaMode) {
+    setMessage(`Updated client '${data.client}'. Click "Validate, Apply + Restart" to apply all beta edits.`, false);
+    setSimpleApplyStatus('Pending edits saved. Run Validate, Apply + Restart when ready.', 'warning');
+    addPendingSimpleChange(`client: updated ${data.client}`);
+  } else {
+    setMessage(`Updated client '${data.client}'.`);
+    await refreshStatus();
+  }
   await loadSimpleSections();
 }
 
@@ -901,12 +1189,18 @@ async function deleteSimpleClient() {
 
   const data = await api('/api/simple-config/clients/delete', {
     method: 'POST',
-    body: JSON.stringify({ id: selectedSimpleClientId, confirmed: true }),
+    body: JSON.stringify({ id: selectedSimpleClientId, confirmed: true, restart_after: shouldRestartOnSimpleEdit }),
   });
   setSimpleClientStatus(`Deleted client '${data.client}'.`, 'success');
-  setMessage(`Deleted client '${data.client}'.`);
+  if (isBetaMode) {
+    setMessage(`Deleted client '${data.client}'. Click "Validate, Apply + Restart" to apply all beta edits.`, false);
+    setSimpleApplyStatus('Pending edits saved. Run Validate, Apply + Restart when ready.', 'warning');
+    addPendingSimpleChange(`client: deleted ${data.client}`);
+  } else {
+    setMessage(`Deleted client '${data.client}'.`);
+    await refreshStatus();
+  }
   selectedSimpleClientId = '';
-  await refreshStatus();
   await loadSimpleSections();
 }
 
@@ -917,17 +1211,26 @@ async function addSimplePolicy() {
   };
   const data = await api('/api/simple-config/policy/add', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, restart_after: shouldRestartOnSimpleEdit }),
   });
 
-  setMessage(`Added new policy '${data.policy}'.`);
+  if (isBetaMode) {
+    setMessage(`Added policy '${data.policy}'. Click "Validate, Apply + Restart" to apply all beta edits.`, false);
+    setSimpleApplyStatus('Pending edits saved. Run Validate, Apply + Restart when ready.', 'warning');
+    addPendingSimpleChange(`policy: added ${data.policy}`);
+  } else {
+    setMessage(`Added new policy '${data.policy}'.`);
+    await refreshStatus();
+  }
   document.getElementById('simple-add-policy-filename').value = '';
   document.getElementById('simple-add-policy-content').value = '';
-  await refreshStatus();
   await loadSimpleSections();
 }
 
 function renderSimpleSection(sectionName) {
+  if (isBetaMode && !betaSimpleSectionAllowlist.has(sectionName)) {
+    sectionName = 'radiusd';
+  }
   selectedSimpleSection = sectionName;
   document.querySelectorAll('[data-simple-section]').forEach((button) => {
     button.classList.toggle('active', button.dataset.simpleSection === sectionName);
@@ -1105,20 +1408,41 @@ async function refreshTrustedRoots() {
   const data = await api('/api/certs/roots');
   const meta = document.getElementById('trusted-root-meta');
   const list = document.getElementById('trusted-root-list');
+  const sourceFilter = document.getElementById('trusted-root-source-filter');
+
+  if (sourceFilter) {
+    const selected = String(sourceFilter.value || trustedRootSourceFilter || 'all').toLowerCase();
+    trustedRootSourceFilter = selected;
+  }
+
+  const certs = Array.isArray(data.certs) ? data.certs : [];
+  const filteredCerts = certs.filter((cert) => {
+    const source = String(cert.source || '').toLowerCase();
+    if (trustedRootSourceFilter === 'system') {
+      return source === 'system';
+    }
+    if (trustedRootSourceFilter === 'custom') {
+      return source === 'custom';
+    }
+    return true;
+  });
 
   const sourceText = (data.sources || []).join(', ');
-  meta.textContent = `Sources: ${sourceText} | Count: ${data.certs.length}`;
+  const filterLabel = trustedRootSourceFilter === 'all' ? 'All' : trustedRootSourceFilter === 'system' ? 'System' : 'User added';
+  meta.textContent = `Sources: ${sourceText} | Showing: ${filteredCerts.length}/${certs.length} | Filter: ${filterLabel}`;
   list.innerHTML = '';
 
-  if (!data.certs.length) {
+  if (!filteredCerts.length) {
     const empty = document.createElement('li');
     empty.className = 'muted';
-    empty.textContent = 'No trusted root certificates found.';
+    empty.textContent = trustedRootSourceFilter === 'all'
+      ? 'No trusted root certificates found.'
+      : `No ${filterLabel.toLowerCase()} trusted root certificates found.`;
     list.appendChild(empty);
     return;
   }
 
-  data.certs.forEach((cert) => {
+  filteredCerts.forEach((cert) => {
     const item = document.createElement('li');
     item.className = 'cert-item';
     if (cert.expired) {
@@ -1250,9 +1574,15 @@ function isSectionAllowed(sectionName) {
     return hasPermission('simple_config_read') || hasPermission('advanced_config_read');
   }
   if (sectionName === 'certs') {
+    if (isBetaMode) {
+      return false;
+    }
     return hasPermission('cert_server_manage') || hasPermission('cert_trusted_roots_manage');
   }
   if (sectionName === 'settings') {
+    if (isBetaMode) {
+      return false;
+    }
     return true;
   }
   return false;
@@ -1272,7 +1602,14 @@ function applyPermissionVisibility() {
 
   const simpleSectionButtons = document.querySelectorAll('[data-simple-section]');
   const simpleAllowed = hasPermission('simple_config_read');
-  simpleSectionButtons.forEach((button) => button.classList.toggle('hidden', !simpleAllowed));
+  simpleSectionButtons.forEach((button) => {
+    const sectionName = button.dataset.simpleSection || '';
+    const sectionAllowed = !isBetaMode || betaSimpleSectionAllowlist.has(sectionName);
+    button.classList.toggle('hidden', !simpleAllowed || !sectionAllowed);
+  });
+  if (isBetaMode && !betaSimpleSectionAllowlist.has(selectedSimpleSection)) {
+    renderSimpleSection('radiusd');
+  }
   document.getElementById('simple-new-client').classList.toggle('hidden', !hasPermission('simple_config_apply'));
   document.getElementById('save-simple-client').classList.toggle('hidden', !hasPermission('simple_config_apply'));
   document.getElementById('add-simple-policy').classList.toggle('hidden', !hasPermission('simple_config_apply'));
@@ -1318,7 +1655,7 @@ function renderConfigModeBar() {
     return;
   }
   const canSimple = hasPermission('simple_config_read');
-  const canAdvanced = hasPermission('advanced_config_read');
+  const canAdvanced = !isBetaMode && hasPermission('advanced_config_read');
   const canUseConfig = canSimple || canAdvanced;
   if (activeConfigMode === 'simple' && !canSimple && canAdvanced) {
     activeConfigMode = 'advanced';
@@ -1386,6 +1723,9 @@ function getInitialSection() {
 }
 
 function getInitialConfigMode() {
+  if (isBetaMode) {
+    return 'simple';
+  }
   const canSimple = hasPermission('simple_config_read');
   const canAdvanced = hasPermission('advanced_config_read');
   if (canAdvanced && !canSimple) {
@@ -1936,8 +2276,9 @@ document.getElementById('apply-simple-config').addEventListener('click', async (
     await applySimpleConfig();
     setSimpleApplyStatus('Validate, apply, and restart completed successfully.', 'success');
   } catch (error) {
-    setSimpleApplyStatus(`Validate/apply/restart failed: ${error.message}`, 'error');
-    setMessage(error.message, true);
+    const friendly = formatApiError(error);
+    setSimpleApplyStatus(`Validate/apply/restart failed: ${friendly}`, 'error');
+    setMessage(friendly, true);
   } finally {
     applyButton.disabled = false;
     applyButton.textContent = originalLabel;
@@ -2000,6 +2341,9 @@ document.getElementById('config-mode-simple').addEventListener('click', async ()
 });
 
 document.getElementById('config-mode-advanced').addEventListener('click', async () => {
+  if (isBetaMode) {
+    return;
+  }
   if (!hasPermission('advanced_config_read')) {
     return;
   }
@@ -2101,6 +2445,15 @@ document.getElementById('add-root-cert').addEventListener('click', async () => {
 
 document.getElementById('refresh-trusted-roots').addEventListener('click', async () => {
   try {
+    await refreshTrustedRoots();
+  } catch (error) {
+    setMessage(error.message, true);
+  }
+});
+
+document.getElementById('trusted-root-source-filter').addEventListener('change', async (event) => {
+  try {
+    trustedRootSourceFilter = String(event?.target?.value || 'all').toLowerCase();
     await refreshTrustedRoots();
   } catch (error) {
     setMessage(error.message, true);
@@ -2246,9 +2599,43 @@ document.getElementById('logout-btn').addEventListener('click', async () => {
   }
 });
 
+const clearPendingButton = document.getElementById('clear-simple-pending');
+if (clearPendingButton) {
+  clearPendingButton.addEventListener('click', async () => {
+    try {
+      await api('/api/simple-config/drafts/clear', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      clearPendingSimpleChanges();
+      setSimpleApplyStatus('Pending change list and server drafts cleared.', 'muted');
+    } catch (error) {
+      setSimpleApplyStatus(`Failed to clear server drafts: ${error.message}`, 'error');
+      setMessage(error.message, true);
+    }
+  });
+}
+
+document.getElementById('save-simple-mod').addEventListener('click', async () => {
+  try {
+    await saveSimpleToggleDraft('mods');
+  } catch (error) {
+    setMessage(error.message, true);
+  }
+});
+
+document.getElementById('save-simple-site').addEventListener('click', async () => {
+  try {
+    await saveSimpleToggleDraft('sites');
+  } catch (error) {
+    setMessage(error.message, true);
+  }
+});
+
 (async () => {
   try {
     initializeCollapsibleSidebars();
+    renderPendingSimpleChanges();
     applyInterfaceSettings(getInterfaceSettings());
     await loadCurrentUserPermissions();
     activeConfigMode = getInitialConfigMode();

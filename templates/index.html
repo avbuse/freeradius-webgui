@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FreeRADIUS Web GUI</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
-<body>
+<body data-beta-mode="{{ beta_mode | lower }}">
   <main class="container">
     <header class="row between">
       <h1>FreeRADIUS Web GUI</h1>
@@ -110,6 +110,14 @@
             <button id="apply-simple-config" data-permission="simple_config_apply">Validate, Apply + Restart</button>
           </div>
           <p id="simple-apply-status" class="muted"></p>
+          <div id="simple-pending-panel" class="panel inset-panel hidden">
+            <div class="row between gap">
+              <h4>Pending Changes</h4>
+              <button id="clear-simple-pending" type="button">Clear list</button>
+            </div>
+            <p id="simple-pending-count" class="muted">No pending edits</p>
+            <ul id="simple-pending-list" class="cert-list"></ul>
+          </div>
         </aside>
 
         <div class="simple-main">
@@ -241,13 +249,47 @@
           <section class="simple-panel hidden" data-simple-panel="mods">
             <h2>Modules (mods)</h2>
             <p class="muted">Common authentication and integration modules.</p>
-            <div id="simple-mods" class="simple-options stack gap"></div>
+            <div class="simple-clients-layout">
+              <aside class="simple-clients-sidebar" data-collapsible-sidebar="simple-mods-list">
+                <div class="row between gap">
+                  <h3>Enable modules</h3>
+                  <button type="button" class="sidebar-collapse-btn" data-toggle-sidebar="simple-mods-list">Collapse</button>
+                </div>
+                <div id="simple-mods" class="simple-options stack gap"></div>
+              </aside>
+              <div class="simple-clients-main panel inset-panel">
+                <h3 id="simple-mod-form-title">Select a module</h3>
+                <p id="simple-mod-path" class="muted"></p>
+                <textarea id="simple-mod-content" rows="12" spellcheck="false" placeholder="Select a module to edit config"></textarea>
+                <p id="simple-mod-status" class="muted"></p>
+                <div class="row gap">
+                  <button id="save-simple-mod" type="button" data-permission="simple_config_apply">Save module draft</button>
+                </div>
+              </div>
+            </div>
           </section>
 
           <section class="simple-panel hidden" data-simple-panel="sites">
             <h2>Virtual servers (sites)</h2>
             <p class="muted">Primary FreeRADIUS virtual server configurations.</p>
-            <div id="simple-sites" class="simple-options stack gap"></div>
+            <div class="simple-clients-layout">
+              <aside class="simple-clients-sidebar" data-collapsible-sidebar="simple-sites-list">
+                <div class="row between gap">
+                  <h3>Enable sites</h3>
+                  <button type="button" class="sidebar-collapse-btn" data-toggle-sidebar="simple-sites-list">Collapse</button>
+                </div>
+                <div id="simple-sites" class="simple-options stack gap"></div>
+              </aside>
+              <div class="simple-clients-main panel inset-panel">
+                <h3 id="simple-site-form-title">Select a site</h3>
+                <p id="simple-site-path" class="muted"></p>
+                <textarea id="simple-site-content" rows="12" spellcheck="false" placeholder="Select a site to edit config"></textarea>
+                <p id="simple-site-status" class="muted"></p>
+                <div class="row gap">
+                  <button id="save-simple-site" type="button" data-permission="simple_config_apply">Save site draft</button>
+                </div>
+              </div>
+            </div>
           </section>
 
           <section class="simple-panel hidden" data-simple-panel="policy">
@@ -330,7 +372,15 @@
 
             <div class="row between gap">
               <h3>Installed trusted roots</h3>
-              <button id="refresh-trusted-roots" data-permission="cert_trusted_roots_manage">Refresh list</button>
+              <div class="row gap">
+                <label for="trusted-root-source-filter" class="muted">Source</label>
+                <select id="trusted-root-source-filter">
+                  <option value="all">All</option>
+                  <option value="system">System</option>
+                  <option value="custom">User added</option>
+                </select>
+                <button id="refresh-trusted-roots" data-permission="cert_trusted_roots_manage">Refresh list</button>
+              </div>
             </div>
             <p id="trusted-root-meta" class="muted"></p>
             <ul id="trusted-root-list" class="cert-list"></ul>
@@ -456,7 +506,8 @@
   </main>
   <script>
     window.APP_CONFIGS = {{ editable_configs | tojson }};
+    window.APP_BETA_MODE = {{ beta_mode | tojson }};
   </script>
-  <script src="/static/app.js"></script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

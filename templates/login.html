@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FreeRADIUS Web GUI - Login</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 <body>
   <main class="container narrow">
@@ -26,7 +26,7 @@
     <section class="panel">
       <h2>Microsoft Entra ID</h2>
       <p class="muted">Use your Entra account to access the Web GUI.</p>
-      <a href="/auth/entra/login"><button type="button">Sign in with Entra ID</button></a>
+      <a href="{{ url_for('entra_login', next=next_path) if next_path else url_for('entra_login') }}"><button type="button">Sign in with Entra ID</button></a>
     </section>
     {% endif %}
 
@@ -39,6 +39,7 @@
   <script>
     const form = document.getElementById('login-form');
     const errorEl = document.getElementById('login-error');
+    const nextPath = {{ next_path | tojson }} || '/';
 
     if (form) {
       form.addEventListener('submit', async (event) => {
@@ -57,7 +58,7 @@
           errorEl.textContent = data.error || 'Login failed';
           return;
         }
-        window.location.href = '/';
+        window.location.href = nextPath;
       });
     }
   </script>

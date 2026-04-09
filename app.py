@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -26,6 +27,80 @@ except ImportError:  # pragma: no cover - optional dependency path
     OAuth = None  # type: ignore[assignment]
 
 load_dotenv()
+
+
+SIMPLE_DRAFT_TTL = timedelta(hours=8)
+_SIMPLE_DRAFT_LOCK = threading.RLock()
+_SIMPLE_DRAFT_STORE: dict[str, dict[str, Any]] = {}
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def simple_draft_owner_key() -> str:
+    principal = str(session.get("principal") or session.get("user") or "").strip().lower()
+    provider = str(session.get("provider") or "local").strip().lower()
+    if not principal:
+        return "anon:local"
+    return f"{provider}:{principal}"
+
+
+def make_simple_draft_key(owner: str, group: str, name: str) -> str:
+    return f"{owner}|{group}|{name}"
+
+
+def cleanup_expired_simple_drafts(now: datetime | None = None) -> None:
+    current = now or _utc_now()
+    with _SIMPLE_DRAFT_LOCK:
+        expired = [
+            key
+            for key, item in _SIMPLE_DRAFT_STORE.items()
+            if not isinstance(item.get("expires_at"), datetime) or item["expires_at"] <= current
+        ]
+        for key in expired:
+            _SIMPLE_DRAFT_STORE.pop(key, None)
+
+
+def get_simple_draft(owner: str, group: str, name: str) -> str | None:
+    cleanup_expired_simple_drafts()
+    key = make_simple_draft_key(owner, group, name)
+    with _SIMPLE_DRAFT_LOCK:
+        item = _SIMPLE_DRAFT_STORE.get(key)
+        if not item:
+            return None
+        content = item.get("content")
+        return str(content) if isinstance(content, str) else None
+
+
+def put_simple_draft(owner: str, group: str, name: str, content: str) -> None:
+    cleanup_expired_simple_drafts()
+    key = make_simple_draft_key(owner, group, name)
+    with _SIMPLE_DRAFT_LOCK:
+        _SIMPLE_DRAFT_STORE[key] = {
+            "owner": owner,
+            "group": group,
+            "name": name,
+            "content": content,
+            "updated_at": _utc_now(),
+            "expires_at": _utc_now() + SIMPLE_DRAFT_TTL,
+        }
+
+
+def pop_all_simple_drafts(owner: str) -> list[dict[str, Any]]:
+    cleanup_expired_simple_drafts()
+    result: list[dict[str, Any]] = []
+    prefix = f"{owner}|"
+    with _SIMPLE_DRAFT_LOCK:
+        for key in [item_key for item_key in _SIMPLE_DRAFT_STORE.keys() if item_key.startswith(prefix)]:
+            item = _SIMPLE_DRAFT_STORE.pop(key, None)
+            if item:
+                result.append(item)
+    return result
+
+
+def clear_simple_drafts(owner: str) -> None:
+    pop_all_simple_drafts(owner)
 
 
 def create_app() -> Flask:
@@ -47,25 +122,47 @@ def create_app() -> Flask:
             client_kwargs={"scope": settings.entra_scopes},
         )
 
-    @app.get("/")
-    def index() -> str:
+    def sanitize_next_path(candidate: str | None) -> str:
+        value = (candidate or "").strip()
+        if not value.startswith("/"):
+            return ""
+        if value.startswith("//"):
+            return ""
+        return value
+
+    def render_index_page(beta_mode: bool = False) -> str:
         if not session.get("authenticated"):
-            return redirect(url_for("login_page"))
+            return redirect(url_for("login_page", next=request.path))
         refresh_session_access_if_needed()
         if not session_has_permission("view_dashboard"):
             session.clear()
-            return redirect(url_for("login_page"))
-        return render_template("index.html", editable_configs=list(settings.editable_configs.keys()))
+            return redirect(url_for("login_page", next=request.path))
+        return render_template(
+            "index.html",
+            editable_configs=list(settings.editable_configs.keys()),
+            beta_mode=beta_mode,
+        )
+
+    @app.get("/")
+    def index() -> str:
+        return render_index_page(beta_mode=False)
+
+    @app.get("/beta")
+    @app.get("/beta/")
+    def beta_index() -> str:
+        return render_index_page(beta_mode=True)
 
     @app.get("/login")
     def login_page() -> str:
+        next_path = sanitize_next_path(request.args.get("next"))
         if session.get("authenticated"):
-            return redirect(url_for("index"))
+            return redirect(next_path or url_for("index"))
         return render_template(
             "login.html",
             local_login_enabled=is_local_login_enabled(settings),
             entra_login_enabled=is_entra_login_enabled(settings),
             auth_mode=settings.auth_mode,
+            next_path=next_path,
         )
 
     @app.post("/api/login")
@@ -86,6 +183,12 @@ def create_app() -> Flask:
     def entra_login() -> Any:
         if not is_entra_login_enabled(settings) or oauth is None:
             return redirect(url_for("login_page"))
+
+        next_path = sanitize_next_path(request.args.get("next"))
+        if next_path:
+            session["login_next_path"] = next_path
+        else:
+            session.pop("login_next_path", None)
 
         redirect_uri = settings.entra_redirect_uri or url_for("entra_callback", _external=True)
         return oauth.entra.authorize_redirect(redirect_uri)
@@ -119,7 +222,8 @@ def create_app() -> Flask:
             groups = []
 
         sign_in_user(settings, principal=principal, display_name=display_name, provider="entra", groups=[str(item) for item in groups])
-        return redirect(url_for("index"))
+        next_path = sanitize_next_path(session.pop("login_next_path", ""))
+        return redirect(next_path or url_for("index"))
 
     @app.get("/api/auth/me")
     @require_auth
@@ -438,6 +542,106 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": str(exc)}), 500
         return jsonify({"ok": True, **snapshot})
 
+    @app.get("/api/simple-config/mods/<module_name>")
+    @require_auth
+    @require_permission("simple_config_read")
+    def simple_config_get_module(module_name: str) -> Any:
+        try:
+            normalized_name = normalize_simple_toggle_item_name(module_name)
+            available_path, _ = resolve_toggle_paths(settings, "mods", normalized_name)
+            source_content = available_path.read_text(encoding="utf-8") if available_path.exists() else ""
+            owner = simple_draft_owner_key()
+            draft_content = get_simple_draft(owner, "mods", normalized_name)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except OSError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
+
+        return jsonify(
+            {
+                "ok": True,
+                "group": "mods",
+                "name": normalized_name,
+                "path": str(available_path),
+                "content": draft_content if draft_content is not None else source_content,
+                "source_content": source_content,
+                "has_draft": draft_content is not None,
+            }
+        )
+
+    @app.post("/api/simple-config/mods/<module_name>/draft")
+    @require_auth
+    @require_permission("simple_config_apply")
+    def simple_config_save_module_draft(module_name: str) -> Any:
+        payload = request.get_json(silent=True) or {}
+        content = str(payload.get("content", ""))
+
+        try:
+            normalized_name = normalize_simple_toggle_item_name(module_name)
+            available_path, _ = resolve_toggle_paths(settings, "mods", normalized_name)
+            if not available_path.exists() or not available_path.is_file():
+                return jsonify({"ok": False, "error": "Module file not found in mods-available."}), 404
+            owner = simple_draft_owner_key()
+            put_simple_draft(owner, "mods", normalized_name, content)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+        return jsonify({"ok": True, "group": "mods", "name": normalized_name, "drafted": True})
+
+    @app.get("/api/simple-config/sites/<site_name>")
+    @require_auth
+    @require_permission("simple_config_read")
+    def simple_config_get_site(site_name: str) -> Any:
+        try:
+            normalized_name = normalize_simple_toggle_item_name(site_name)
+            available_path, _ = resolve_toggle_paths(settings, "sites", normalized_name)
+            source_content = available_path.read_text(encoding="utf-8") if available_path.exists() else ""
+            owner = simple_draft_owner_key()
+            draft_content = get_simple_draft(owner, "sites", normalized_name)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except OSError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 500
+
+        return jsonify(
+            {
+                "ok": True,
+                "group": "sites",
+                "name": normalized_name,
+                "path": str(available_path),
+                "content": draft_content if draft_content is not None else source_content,
+                "source_content": source_content,
+                "has_draft": draft_content is not None,
+            }
+        )
+
+    @app.post("/api/simple-config/sites/<site_name>/draft")
+    @require_auth
+    @require_permission("simple_config_apply")
+    def simple_config_save_site_draft(site_name: str) -> Any:
+        payload = request.get_json(silent=True) or {}
+        content = str(payload.get("content", ""))
+
+        try:
+            normalized_name = normalize_simple_toggle_item_name(site_name)
+            available_path, _ = resolve_toggle_paths(settings, "sites", normalized_name)
+            if not available_path.exists() or not available_path.is_file():
+                return jsonify({"ok": False, "error": "Site file not found in sites-available."}), 404
+            owner = simple_draft_owner_key()
+            put_simple_draft(owner, "sites", normalized_name, content)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+        return jsonify({"ok": True, "group": "sites", "name": normalized_name, "drafted": True})
+
+    @app.post("/api/simple-config/drafts/clear")
+    @require_auth
+    @require_permission("simple_config_apply")
+    def simple_config_clear_drafts() -> Any:
+        owner = simple_draft_owner_key()
+        clear_simple_drafts(owner)
+        return jsonify({"ok": True})
+
     @app.post("/api/simple-config/apply")
     @require_auth
     @require_permission("simple_config_apply")
@@ -448,7 +652,10 @@ def create_app() -> Flask:
         restart_after = bool(payload.get("restart_after", True))
 
         state_snapshots: list[dict[str, Any]] = []
+        file_snapshots: list[dict[str, Any]] = []
         changes: list[str] = []
+        owner = simple_draft_owner_key()
+        draft_items = pop_all_simple_drafts(owner)
         try:
             apply_toggle_selections(
                 selections=mods,
@@ -467,8 +674,16 @@ def create_app() -> Flask:
                 changes=changes,
             )
 
+            apply_simple_draft_items(
+                settings=settings,
+                draft_items=draft_items,
+                file_snapshots=file_snapshots,
+                changes=changes,
+            )
+
             validation = run_command(settings.validate_command, check=False)
             if validation.returncode != 0:
+                rollback_simple_file_changes(file_snapshots)
                 rollback_toggle_changes(state_snapshots)
                 return (
                     jsonify(
@@ -484,6 +699,7 @@ def create_app() -> Flask:
             if restart_after:
                 restart = run_command(["systemctl", "restart", settings.freeradius_service], check=False)
                 if restart.returncode != 0:
+                    rollback_simple_file_changes(file_snapshots)
                     rollback_toggle_changes(state_snapshots)
                     run_command(["systemctl", "restart", settings.freeradius_service], check=False)
                     return (
@@ -497,10 +713,16 @@ def create_app() -> Flask:
                         500,
                     )
         except ValueError as exc:
+            rollback_simple_file_changes(file_snapshots)
             rollback_toggle_changes(state_snapshots)
+            for item in draft_items:
+                put_simple_draft(owner, str(item.get("group", "")), str(item.get("name", "")), str(item.get("content", "")))
             return jsonify({"ok": False, "error": str(exc)}), 400
         except OSError as exc:
+            rollback_simple_file_changes(file_snapshots)
             rollback_toggle_changes(state_snapshots)
+            for item in draft_items:
+                put_simple_draft(owner, str(item.get("group", "")), str(item.get("name", "")), str(item.get("content", "")))
             return jsonify({"ok": False, "error": str(exc)}), 500
 
         return jsonify({"ok": True, "changes": changes})
@@ -583,6 +805,7 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         option_key = str(payload.get("key", "")).strip()
         value = str(payload.get("value", "")).strip()
+        restart_after = bool(payload.get("restart_after", True))
 
         radiusd_path = settings.freeradius_config_root / "radiusd.conf"
         try:
@@ -621,7 +844,7 @@ def create_app() -> Flask:
                 settings=settings,
                 path=radiusd_path,
                 content=updated_text,
-                restart_after=True,
+                restart_after=restart_after,
             )
             if not result.get("ok"):
                 return jsonify(result), status_code
@@ -638,6 +861,7 @@ def create_app() -> Flask:
         option_key = str(payload.get("key", "")).strip()
         should_be_active = bool(payload.get("active", True))
         value = str(payload.get("value", "")).strip()
+        restart_after = bool(payload.get("restart_after", True))
 
         radiusd_path = settings.freeradius_config_root / "radiusd.conf"
         try:
@@ -687,7 +911,7 @@ def create_app() -> Flask:
                 settings=settings,
                 path=radiusd_path,
                 content=updated_text,
-                restart_after=True,
+                restart_after=restart_after,
             )
             if not result.get("ok"):
                 return jsonify(result), status_code
@@ -721,6 +945,7 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         name = secure_filename(str(payload.get("name", "")).strip())
         target_path_raw = str(payload.get("target_path", "")).strip()
+        restart_after = bool(payload.get("restart_after", True))
         target_path = settings.freeradius_config_root / "clients.conf"
         if target_path_raw:
             candidate = Path(target_path_raw).resolve()
@@ -747,7 +972,7 @@ def create_app() -> Flask:
                 settings=settings,
                 path=target_path,
                 content=updated_text,
-                restart_after=True,
+                restart_after=restart_after,
             )
             if not result.get("ok"):
                 return jsonify(result), status_code
@@ -762,6 +987,7 @@ def create_app() -> Flask:
     def simple_config_update_client() -> Any:
         payload = request.get_json(silent=True) or {}
         client_id = str(payload.get("id", "")).strip()
+        restart_after = bool(payload.get("restart_after", True))
         if not client_id:
             return jsonify({"ok": False, "error": "Client id is required."}), 400
 
@@ -799,7 +1025,7 @@ def create_app() -> Flask:
             settings=settings,
             path=source_path,
             content=updated_text,
-            restart_after=True,
+            restart_after=restart_after,
         )
         if not result.get("ok"):
             return jsonify(result), status_code
@@ -813,6 +1039,7 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         client_id = str(payload.get("id", "")).strip()
         confirmed = bool(payload.get("confirmed", False))
+        restart_after = bool(payload.get("restart_after", True))
 
         if not client_id:
             return jsonify({"ok": False, "error": "Client id is required."}), 400
@@ -843,7 +1070,7 @@ def create_app() -> Flask:
             settings=settings,
             path=source_path,
             content=updated_text,
-            restart_after=True,
+            restart_after=restart_after,
         )
         if not result.get("ok"):
             return jsonify(result), status_code
@@ -857,6 +1084,7 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         filename = secure_filename(str(payload.get("filename", "")).strip())
         content = payload.get("content")
+        restart_after = bool(payload.get("restart_after", True))
 
         if not filename:
             return jsonify({"ok": False, "error": "Policy filename is required."}), 400
@@ -878,7 +1106,7 @@ def create_app() -> Flask:
             settings=settings,
             path=policy_path,
             content=content,
-            restart_after=True,
+            restart_after=restart_after,
         )
         if not result.get("ok"):
             return jsonify(result), status_code
@@ -3115,6 +3343,76 @@ def find_simple_client_by_id(settings: AppSettings, client_id: str, include_secr
     return None
 
 
+def normalize_simple_toggle_item_name(name: str) -> str:
+    normalized = str(name).strip()
+    if not normalized or not re.fullmatch(r"[A-Za-z0-9_.-]+", normalized):
+        raise ValueError("Invalid item name.")
+    return normalized
+
+
+def resolve_toggle_paths(settings: AppSettings, group_name: str, item_name: str) -> tuple[Path, Path]:
+    if group_name == "mods":
+        available_dir = settings.freeradius_config_root / "mods-available"
+        enabled_dir = settings.freeradius_config_root / "mods-enabled"
+    elif group_name == "sites":
+        available_dir = settings.freeradius_config_root / "sites-available"
+        enabled_dir = settings.freeradius_config_root / "sites-enabled"
+    else:
+        raise ValueError("Unsupported toggle group.")
+
+    available_path = (available_dir / item_name).resolve()
+    # Keep the enabled entry path itself (do not resolve final symlink target).
+    enabled_path = enabled_dir.resolve() / item_name
+
+    if not is_under_directory(available_path, available_dir):
+        raise ValueError("Invalid available config path.")
+    if enabled_path.parent != enabled_dir.resolve():
+        raise ValueError("Invalid enabled config path.")
+    return available_path, enabled_path
+
+
+def apply_simple_draft_items(
+    settings: AppSettings,
+    draft_items: list[dict[str, Any]],
+    file_snapshots: list[dict[str, Any]],
+    changes: list[str],
+) -> None:
+    for item in draft_items:
+        group = str(item.get("group", "")).strip()
+        name = normalize_simple_toggle_item_name(str(item.get("name", "")).strip())
+        content = str(item.get("content", ""))
+
+        available_path, _ = resolve_toggle_paths(settings, group, name)
+        if not available_path.exists() or not available_path.is_file():
+            raise ValueError(f"Cannot update {group} '{name}': file not found in available directory.")
+
+        existed_before = available_path.exists()
+        backup_path = backup_file(available_path)
+        file_snapshots.append(
+            {
+                "path": available_path,
+                "existed_before": existed_before,
+                "backup": str(backup_path),
+            }
+        )
+        apply_text_atomic(available_path, content)
+        changes.append(f"Updated {group}: {name}")
+
+
+def rollback_simple_file_changes(file_snapshots: list[dict[str, Any]]) -> None:
+    for snapshot in reversed(file_snapshots):
+        path = Path(str(snapshot.get("path", "")))
+        backup = Path(str(snapshot.get("backup", "")))
+        existed_before = bool(snapshot.get("existed_before", False))
+        try:
+            if existed_before and backup.exists():
+                restore_file(backup, path)
+            elif not existed_before and path.exists():
+                path.unlink()
+        except OSError:
+            continue
+
+
 def list_toggle_items(available_dir: Path, enabled_dir: Path, descriptions: dict[str, str]) -> list[dict[str, Any]]:
     if not available_dir.exists() or not available_dir.is_dir():
         return []
@@ -3134,6 +3432,7 @@ def list_toggle_items(available_dir: Path, enabled_dir: Path, descriptions: dict
                 "enabled": enabled,
                 "description": descriptions.get(path.name, ""),
                 "featured": path.name in descriptions,
+                "has_draft": False,
             }
         )
 
@@ -3172,10 +3471,17 @@ def apply_toggle_selections(
     for name, value in selections.items():
         if not isinstance(name, str):
             continue
+        normalized_name = normalize_simple_toggle_item_name(name)
         should_enable = bool(value)
 
-        available_path = available_dir / name
-        enabled_path = enabled_dir / name
+        available_path = (available_dir / normalized_name).resolve()
+        # Keep the enabled entry path itself (do not resolve final symlink target).
+        enabled_path = enabled_dir.resolve() / normalized_name
+        if not is_under_directory(available_path, available_dir):
+            raise ValueError(f"Cannot change {group_label} '{normalized_name}': invalid available path.")
+        if enabled_path.parent != enabled_dir.resolve():
+            raise ValueError(f"Cannot change {group_label} '{normalized_name}': invalid enabled path.")
+
         state_snapshots.append(capture_toggle_state(enabled_path))
 
         currently_enabled = enabled_path.exists() or enabled_path.is_symlink()
@@ -3186,18 +3492,20 @@ def apply_toggle_selections(
 
         if should_enable:
             if not available_path.exists():
-                raise ValueError(f"Cannot enable {group_label} '{name}': not found in available directory.")
+                raise ValueError(f"Cannot enable {group_label} '{normalized_name}': not found in available directory.")
+            if not available_path.is_file():
+                raise ValueError(f"Cannot enable {group_label} '{normalized_name}': available entry is not a file.")
             if enabled_path.exists() and not enabled_path.is_symlink():
-                raise ValueError(f"Cannot enable {group_label} '{name}': enabled entry is a regular file.")
+                raise ValueError(f"Cannot enable {group_label} '{normalized_name}': enabled entry is a regular file.")
             if enabled_path.is_symlink():
                 enabled_path.unlink()
             enabled_path.symlink_to(available_path)
-            changes.append(f"Enabled {group_label}: {name}")
+            changes.append(f"Enabled {group_label}: {normalized_name}")
             continue
 
         if enabled_path.is_symlink() or enabled_path.exists():
             enabled_path.unlink()
-            changes.append(f"Disabled {group_label}: {name}")
+            changes.append(f"Disabled {group_label}: {normalized_name}")
 
 
 def rollback_toggle_changes(state_snapshots: list[dict[str, Any]]) -> None:

@@ -30,6 +30,11 @@ python app.py
 
 Default URL: `http://<server>:8080`
 
+Beta comparison URL: `http://<server>:8080/beta`
+
+- `/` keeps the full current interface.
+- `/beta` loads a simplified comparison view (overview + config/simple mode focus).
+
 ## 3) Required host permissions
 
 The process user must be able to:
